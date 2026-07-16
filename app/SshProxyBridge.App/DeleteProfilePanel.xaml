@@ -1,0 +1,50 @@
+<UserControl x:Class="SshProxyBridge.App.DeleteProfilePanel"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="560" Height="600"
+        Background="{StaticResource WindowBackgroundBrush}"
+        FontFamily="Microsoft YaHei UI, Microsoft YaHei">
+    <Grid Margin="30">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="删除服务器 Profile" FontSize="22" FontWeight="SemiBold"
+                   Foreground="{StaticResource TextPrimaryBrush}" />
+        <TextBlock x:Name="DescriptionText" Grid.Row="1" Margin="0,8,0,20"
+                   TextWrapping="Wrap" Foreground="{StaticResource TextSecondaryBrush}" />
+
+        <StackPanel Grid.Row="2">
+            <CheckBox x:Name="StopTunnelCheckBox" Content="删除前停止该 Profile 的受管隧道"
+                      Margin="0,0,0,13" />
+            <CheckBox x:Name="DeleteCredentialCheckBox" Content="删除保存的 Windows 服务器密码"
+                      Margin="0,0,0,13" />
+            <CheckBox x:Name="DeleteSshConfigCheckBox" Content="删除本机 SSH Config 托管块"
+                      IsChecked="True" Margin="0,0,0,13" />
+            <CheckBox x:Name="DeleteRuntimeCheckBox" Content="删除本地运行配置、known_hosts 和状态日志"
+                      IsChecked="True" IsEnabled="False" Margin="0,0,0,13" />
+            <CheckBox x:Name="DeletePrivateKeyCheckBox" Content="同时删除该 Profile 的专用 SSH Key"
+                      Margin="0,0,0,18" />
+
+            <Border Background="#FEF3C7" CornerRadius="8" Padding="13">
+                <TextBlock TextWrapping="Wrap" Foreground="#92400E"
+                           Text="默认保留专用私钥和服务器 authorized_keys 项。当前版本不会自动删除服务器端文件，以免误伤正在使用的登录方式。删除 Profile 不会影响“当前连接”的旧配置。" />
+            </Border>
+            <CheckBox x:Name="ConfirmDeleteCheckBox"
+                      Content="我确认删除此 Profile；服务器端公钥和远程配置将保留"
+                      Margin="0,18,0,0" Checked="ConfirmDelete_Changed"
+                      Unchecked="ConfirmDelete_Changed" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="取消" Style="{StaticResource SecondaryButtonStyle}"
+                    Click="Cancel_Click" Margin="0,0,10,0" />
+            <Button x:Name="DeleteButton" Content="确认删除" Background="#DC2626"
+                    Style="{StaticResource PrimaryButtonStyle}" Click="Delete_Click"
+                    IsEnabled="False" />
+        </StackPanel>
+    </Grid>
+</UserControl>

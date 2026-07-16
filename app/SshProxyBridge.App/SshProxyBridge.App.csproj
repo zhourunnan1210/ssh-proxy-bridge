@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <Product>SSH Proxy Bridge</Product>
+    <Title>SSH Proxy Bridge</Title>
+    <Company>SSH Proxy Bridge contributors</Company>
+    <Authors>SSH Proxy Bridge contributors</Authors>
+    <Copyright>Copyright © 2026 SSH Proxy Bridge contributors</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/zhourunnan1210/ssh-proxy-bridge</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/zhourunnan1210/ssh-proxy-bridge.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <AssemblyName>SshProxyBridge</AssemblyName>
+    <RootNamespace>SshProxyBridge.App</RootNamespace>
+    <Description>Connect remote development servers to a Windows proxy and open them in VS Code.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SshProxyBridge.Core\SshProxyBridge.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="SshProxyBridge.App.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\ssh-proxy-bridge.ps1" Link="ssh-proxy-bridge.ps1"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\USER_GUIDE.md" Link="USER_GUIDE.md"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\config.example.json" Link="config.example.json"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\PORTABLE_README.txt" Link="PORTABLE_README.txt"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\LICENSE" Link="LICENSE"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\THIRD_PARTY_NOTICES.md" Link="THIRD_PARTY_NOTICES.md"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

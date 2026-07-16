@@ -1,0 +1,119 @@
+[CmdletBinding()]
+param(
+    [string]$Configuration = 'Release',
+    [ValidatePattern('^[0-9A-Za-z.-]+$')]
+    [string]$Runtime = 'win-x64',
+    [ValidatePattern('^[0-9A-Za-z.-]+$')]
+    [string]$Version = '0.1.0'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$root = $PSScriptRoot
+$project = Join-Path $root 'app\SshProxyBridge.App\SshProxyBridge.App.csproj'
+$releaseRoot = Join-Path $root 'release'
+$packageName = "SSH-Proxy-Bridge-v$Version-$Runtime"
+$publishDirectory = Join-Path $releaseRoot $packageName
+$zipPath = Join-Path $releaseRoot "$packageName.zip"
+$zipChecksumPath = "$zipPath.sha256"
+$artifactsDirectory = Join-Path $env:TEMP "SshProxyBridge.Publish.$PID"
+
+function Assert-ChildPath([string]$Candidate, [string]$Parent) {
+    $candidatePath = [IO.Path]::GetFullPath($Candidate).TrimEnd('\')
+    $parentPath = [IO.Path]::GetFullPath($Parent).TrimEnd('\') + '\'
+    if (-not $candidatePath.StartsWith($parentPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to modify a path outside the expected directory: $candidatePath"
+    }
+}
+
+Assert-ChildPath $publishDirectory $releaseRoot
+Assert-ChildPath $zipPath $releaseRoot
+Assert-ChildPath $zipChecksumPath $releaseRoot
+Assert-ChildPath $artifactsDirectory $env:TEMP
+
+if (-not (Test-Path -LiteralPath $releaseRoot)) {
+    New-Item -ItemType Directory -Path $releaseRoot | Out-Null
+}
+if (Test-Path -LiteralPath $publishDirectory) {
+    Remove-Item -LiteralPath $publishDirectory -Recurse -Force
+}
+if (Test-Path -LiteralPath $zipPath) {
+    Remove-Item -LiteralPath $zipPath -Force
+}
+if (Test-Path -LiteralPath $zipChecksumPath) {
+    Remove-Item -LiteralPath $zipChecksumPath -Force
+}
+
+try {
+    & dotnet publish $project `
+        --configuration $Configuration `
+        --runtime $Runtime `
+        --self-contained true `
+        --nologo `
+        -p:PublishProfile=PortableWinX64 `
+        -p:Version=$Version `
+        -p:ArtifactsPath=$artifactsDirectory `
+        -p:NuGetAudit=false `
+        -p:DebugType=None `
+        -p:DebugSymbols=false `
+        --output $publishDirectory
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet publish failed with exit code $LASTEXITCODE."
+    }
+
+    Get-ChildItem -LiteralPath $publishDirectory -Filter '*.pdb' -File |
+        Remove-Item -Force
+
+    $requiredFiles = @(
+        'SshProxyBridge.exe',
+        'ssh-proxy-bridge.ps1',
+        'USER_GUIDE.md',
+        'PORTABLE_README.txt',
+        'config.example.json',
+        'LICENSE',
+        'THIRD_PARTY_NOTICES.md'
+    )
+    foreach ($name in $requiredFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory $name) -PathType Leaf)) {
+            throw "Published package is missing: $name"
+        }
+    }
+    if (Test-Path -LiteralPath (Join-Path $publishDirectory 'config.local.json')) {
+        throw 'Published package must not contain config.local.json.'
+    }
+
+    $executable = Join-Path $publishDirectory 'SshProxyBridge.exe'
+    $verification = Start-Process -FilePath $executable -ArgumentList '--verify-package' `
+        -WindowStyle Hidden -Wait -PassThru
+    if ($verification.ExitCode -ne 0) {
+        throw "Portable package self-check failed with exit code $($verification.ExitCode)."
+    }
+
+    $hash = Get-FileHash -LiteralPath $executable -Algorithm SHA256
+    $hashLine = "$($hash.Hash.ToLowerInvariant())  SshProxyBridge.exe"
+    [IO.File]::WriteAllText(
+        (Join-Path $publishDirectory 'SHA256SUMS.txt'),
+        $hashLine + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false))
+
+    Compress-Archive -Path (Join-Path $publishDirectory '*') -DestinationPath $zipPath -CompressionLevel Optimal
+    $zipHash = Get-FileHash -LiteralPath $zipPath -Algorithm SHA256
+    [IO.File]::WriteAllText(
+        $zipChecksumPath,
+        "$($zipHash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($zipPath))" + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false))
+
+    Write-Host ''
+    Write-Host 'Portable package created:' -ForegroundColor Green
+    Write-Host "  Folder: $publishDirectory"
+    Write-Host "  ZIP:    $zipPath"
+    Write-Host "  EXE SHA256: $($hash.Hash.ToLowerInvariant())"
+    Write-Host "  ZIP SHA256: $($zipHash.Hash.ToLowerInvariant())"
+}
+finally {
+    if (Test-Path -LiteralPath $artifactsDirectory) {
+        Assert-ChildPath $artifactsDirectory $env:TEMP
+        Remove-Item -LiteralPath $artifactsDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

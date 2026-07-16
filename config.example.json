@@ -1,0 +1,24 @@
+{
+  "proxy": {
+    "host": "127.0.0.1",
+    "port": 7897,
+    "protocol": "auto",
+    "processName": "clash-verge",
+    "executablePath": "C:\\Path\\To\\proxy.exe",
+    "autoStart": true
+  },
+  "ssh": {
+    "alias": "proxy-server",
+    "host": "203.0.113.10",
+    "port": 22,
+    "user": "developer",
+    "identityFile": "%USERPROFILE%\\.ssh\\id_ed25519_proxy_server",
+    "remoteProxyHost": "127.0.0.1",
+    "remoteProxyPort": 17897
+  },
+  "vscode": {
+    "launch": true,
+    "remoteWorkspace": "/path/to/project",
+    "extensionId": "openai.chatgpt"
+  }
+}

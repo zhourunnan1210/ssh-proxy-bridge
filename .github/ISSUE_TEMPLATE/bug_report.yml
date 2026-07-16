@@ -1,0 +1,42 @@
+name: Bug report
+description: 报告可复现的问题；不要提交密码、私钥或真实服务器资料。
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: 请先移除日志中的服务器地址、用户名、路径、凭据和密钥信息。安全漏洞请使用 Security 私密报告。
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: 例如 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 实际发生了什么？预期结果是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: 使用脱敏后的示例数据。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: Windows、VS Code、Remote-SSH、服务器系统和代理软件版本。
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已经删除密码、私钥、真实服务器地址和其他敏感信息。
+          required: true

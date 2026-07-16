@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        shell: pwsh
+        run: |
+          dotnet restore .\app\SshProxyBridge.Core.Tests\SshProxyBridge.Core.Tests.csproj --nologo
+          dotnet restore .\app\SshProxyBridge.App.Tests\SshProxyBridge.App.Tests.csproj --nologo
+
+      - name: Run core tests
+        shell: pwsh
+        run: dotnet run --project .\app\SshProxyBridge.Core.Tests\SshProxyBridge.Core.Tests.csproj --configuration Release --no-restore
+
+      - name: Run embedded UI tests
+        shell: pwsh
+        run: dotnet run --project .\app\SshProxyBridge.App.Tests\SshProxyBridge.App.Tests.csproj --configuration Release --no-restore -- .\USER_GUIDE.md
+
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path '.\ssh-proxy-bridge.ps1'),
+            [ref]$tokens,
+            [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+
+      - name: Build application
+        shell: pwsh
+        run: dotnet build .\app\SshProxyBridge.App\SshProxyBridge.App.csproj --configuration Release --no-restore --nologo

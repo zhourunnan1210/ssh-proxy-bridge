@@ -1,0 +1,98 @@
+<UserControl x:Class="SshProxyBridge.App.EditProfilePanel"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="620" Height="650"
+        Background="{StaticResource WindowBackgroundBrush}"
+        FontFamily="Microsoft YaHei UI, Microsoft YaHei">
+    <UserControl.Resources>
+        <Style TargetType="TextBox">
+            <Setter Property="Height" Value="40" />
+            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Background" Value="White" />
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Height" Value="40" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        </Style>
+        <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,0,0,7" />
+        </Style>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Background="#172033" Padding="28,23">
+            <StackPanel>
+                <TextBlock Text="编辑服务器设置" Foreground="White"
+                           FontSize="22" FontWeight="SemiBold" />
+                <TextBlock x:Name="IdentityText" Foreground="#AFC0D8" Margin="0,7,0,0" />
+            </StackPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="30,24">
+                <TextBlock Text="服务器名称" Style="{StaticResource FieldLabelStyle}" />
+                <TextBox x:Name="ServerNameBox" Margin="0,0,0,16" />
+
+                <Grid Margin="0,0,0,16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="16" />
+                        <ColumnDefinition Width="130" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="本机代理地址" Style="{StaticResource FieldLabelStyle}" />
+                        <TextBox x:Name="ProxyHostBox" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="代理端口" Style="{StaticResource FieldLabelStyle}" />
+                        <TextBox x:Name="ProxyPortBox" />
+                    </StackPanel>
+                </Grid>
+
+                <TextBlock Text="代理协议" Style="{StaticResource FieldLabelStyle}" />
+                <ComboBox x:Name="ProxyProtocolBox" Margin="0,0,0,16">
+                    <ComboBoxItem Content="自动检测" Tag="Auto" />
+                    <ComboBoxItem Content="HTTP" Tag="Http" />
+                    <ComboBoxItem Content="SOCKS5" Tag="Socks5" />
+                    <ComboBoxItem Content="Mixed" Tag="Mixed" />
+                </ComboBox>
+
+                <TextBlock Text="代理程序路径（可选）" Style="{StaticResource FieldLabelStyle}" />
+                <TextBox x:Name="ProxyExecutableBox" />
+                <CheckBox x:Name="ProxyAutoStartCheckBox" Content="代理未运行时自动启动"
+                          Margin="0,13,0,16" />
+
+                <TextBlock Text="默认远程项目目录" Style="{StaticResource FieldLabelStyle}" />
+                <TextBox x:Name="WorkspaceBox" Margin="0,0,0,16" />
+
+                <Border Background="#EFF6FF" CornerRadius="8" Padding="12">
+                    <TextBlock TextWrapping="Wrap" Foreground="#1E40AF"
+                               Text="本页不会修改 SSH 地址、账号、主机指纹、专用 Key 或当前隧道。代理设置变更会在下次停止并重新连接后完全生效。" />
+                </Border>
+
+                <Border x:Name="ErrorBorder" Visibility="Collapsed"
+                        Background="#FEE2E2" CornerRadius="7" Padding="10" Margin="0,14,0,0">
+                    <TextBlock x:Name="ErrorText" Foreground="#991B1B" TextWrapping="Wrap" />
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="28,0,28,24">
+            <Button Content="取消" Style="{StaticResource SecondaryButtonStyle}"
+                    Click="Cancel_Click" Margin="0,0,10,0" />
+            <Button Content="保存" Style="{StaticResource PrimaryButtonStyle}"
+                    Click="Save_Click" IsDefault="True" />
+        </StackPanel>
+    </Grid>
+</UserControl>

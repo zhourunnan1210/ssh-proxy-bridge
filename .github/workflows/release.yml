@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*.*.*
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Validate version
+        id: version
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.-]+)?$') {
+            throw "Unsupported release tag: $env:GITHUB_REF_NAME"
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Run core tests
+        shell: pwsh
+        run: dotnet run --project .\app\SshProxyBridge.Core.Tests\SshProxyBridge.Core.Tests.csproj --configuration Release
+
+      - name: Run embedded UI tests
+        shell: pwsh
+        run: dotnet run --project .\app\SshProxyBridge.App.Tests\SshProxyBridge.App.Tests.csproj --configuration Release -- .\USER_GUIDE.md
+
+      - name: Build portable package
+        shell: pwsh
+        run: .\publish-portable.ps1 -Version '${{ steps.version.outputs.value }}'
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: SSH-Proxy-Bridge-${{ steps.version.outputs.value }}-win-x64
+          path: |
+            release/*.zip
+            release/*.sha256
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem .\release -File |
+            Where-Object { $_.Extension -eq '.zip' -or $_.Name.EndsWith('.zip.sha256') } |
+            ForEach-Object FullName
+          if ($assets.Count -lt 2) {
+            throw 'Release assets are incomplete.'
+          }
+          gh release create $env:GITHUB_REF_NAME @assets `
+            --repo $env:GITHUB_REPOSITORY `
+            --verify-tag `
+            --generate-notes `
+            --title "SSH Proxy Bridge $env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release create failed with exit code $LASTEXITCODE."
+          }

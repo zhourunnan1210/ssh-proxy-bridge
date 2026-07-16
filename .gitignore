@@ -1,0 +1,12 @@
+config.local.json
+.state/
+*.log
+app/**/bin/
+app/**/obj/
+release/
+.vs/
+*.user
+*.suo
+*.pfx
+*.snk
+id_ed25519*
