@@ -50,13 +50,97 @@ Windows 127.0.0.1:<local-proxy-port>
 
 ### 使用发行包
 
-1. 下载 `SSH-Proxy-Bridge-v<version>-win-x64.zip` 并完整解压。
-2. 双击 `SshProxyBridge.exe`。
-3. 点击“添加服务器”，填写 SSH、本地代理和远程项目目录。
-4. 核对服务器主机指纹并完成 SSH 初始化。
-5. 点击“连接并打开 VS Code”。
+#### 1. 下载正确的文件
 
-发行包自带 .NET 运行时，目标电脑不需要另外安装 .NET。
+1. 打开项目的 [Releases 页面](https://github.com/zhourunnan1210/ssh-proxy-bridge/releases)。
+2. 选择需要的版本。第一次使用建议下载页面顶部最新的稳定版；标有 `Pre-release` 的版本属于公开预览版，功能可用，但仍可能调整。
+3. 在版本页面底部展开 **Assets**，下载名称类似下面的 Windows 发行包：
+
+   ```text
+   SSH-Proxy-Bridge-v<版本号>-win-x64.zip
+   ```
+
+   不要下载 GitHub 自动生成的 `Source code (zip)` 或 `Source code (tar.gz)`；它们只包含源码，不能直接运行。
+
+#### 2. 校验下载文件（推荐）
+
+每个 Release 的说明中都会列出发行包的 SHA-256。下载完成后，在 ZIP 所在目录打开 PowerShell，例如对 `v0.1.0` 执行：
+
+```powershell
+Get-FileHash .\SSH-Proxy-Bridge-v0.1.0-win-x64.zip -Algorithm SHA256
+```
+
+确认输出的 `Hash` 与 Release 页面公布的 ZIP SHA-256 完全一致。解压后还可以校验 EXE：
+
+```powershell
+Get-FileHash .\SshProxyBridge.exe -Algorithm SHA256
+Get-Content .\SHA256SUMS.txt
+```
+
+两处的 EXE SHA-256 应当一致。如果校验值不一致，请删除文件并从本项目 Releases 页面重新下载。
+
+#### 3. 完整解压
+
+右键 ZIP，选择“全部解压”，或者使用 PowerShell：
+
+```powershell
+Expand-Archive .\SSH-Proxy-Bridge-v0.1.0-win-x64.zip -DestinationPath .\SSH-Proxy-Bridge-v0.1.0
+```
+
+不要在压缩包预览窗口中直接运行 EXE，也不要只复制 `SshProxyBridge.exe`。EXE、`ssh-proxy-bridge.ps1`、`USER_GUIDE.md` 和其他随包文件需要保留在同一目录。
+
+发行包已经包含 .NET 运行时，目标电脑不需要另外安装 .NET。开始前仍需准备：
+
+- Windows 10/11 x64 和 Windows OpenSSH Client。
+- VS Code、Remote - SSH 扩展，以及需要在服务器使用的远程扩展，例如 Codex。
+- 已启动的 Windows HTTP、HTTPS 或 mixed 代理，并知道它监听的地址和端口，例如 `127.0.0.1:7897`。
+- Linux 服务器的 SSH 地址、端口、用户名和密码；服务器需要允许公钥认证和 TCP 端口转发。
+
+#### 4. 第一次启动
+
+双击解压目录中的：
+
+```text
+SshProxyBridge.exe
+```
+
+当前版本没有商业代码签名证书，Windows SmartScreen 可能显示“未知发布者”。只有在确认下载地址来自本项目 Releases 页面、并且 SHA-256 校验通过后，才点击“更多信息”→“仍要运行”。
+
+应用打开后，先查看左下角“本机代理”状态：
+
+- 绿色：配置的代理端口正在监听，可以继续连接。
+- 灰色：先启动代理软件，或在服务器配置中核对代理地址和端口。
+
+#### 5. 添加服务器
+
+点击右上角“添加服务器”，按照三步向导填写：
+
+1. **SSH 服务器**：填写便于识别的服务器名称、SSH 地址、端口、Linux 用户和服务器密码。密码只用于验证身份和安装公钥；选择“保存密码”时，密码写入当前 Windows 用户的 Credential Manager，不会写入普通配置文件。
+2. **Windows 本机代理**：地址通常填写 `127.0.0.1`，端口填写代理软件的实际监听端口；不确定代理协议时选择“自动检测”。
+3. **项目与安全选项**：远程目录填写 Linux 绝对路径，例如 `/workspace/project`；普通用户建议保留“一键模式”和默认服务器代理端口。
+
+首次连接时，应用会显示服务器 SSH 主机密钥类型和 SHA-256 指纹。请通过云服务商控制台或服务器管理员提供的信息核对指纹；无法确认时不要继续。
+
+密码和主机指纹验证成功后，服务器状态会变为“密码已验证”。选择该服务器并点击“完成 SSH 初始化”，应用会：
+
+1. 为这个服务器 Profile 创建独立的 ED25519 Key。
+2. 把公钥加入服务器的 `~/.ssh/authorized_keys`。
+3. 验证无需服务器密码的 Key-only 登录。
+4. 检查并选择可用的服务器代理端口。
+5. 生成应用专属的 `known_hosts`、SSH Config 和运行配置。
+
+全部成功后，服务器状态会显示“可以连接”。重复初始化不会重复写入相同公钥。
+
+#### 6. 连接并打开远程项目
+
+1. 确认 Windows 代理软件正在运行。
+2. 在 SSH Proxy Bridge 中选择目标服务器。
+3. 确认左下角本机代理圆点为绿色。
+4. 点击“连接并打开 VS Code”。
+
+应用会建立或复用 SSH 反向隧道，从服务器验证代理是否可用，更新受管的远程代理环境，然后让 VS Code Remote-SSH 打开配置的远程目录。VS Code 打开后，SSH Proxy Bridge 应显示“已连接”；重复点击不会叠加新的受管隧道进程。
+
+以后日常使用通常只需要：启动代理软件 → 打开 SSH Proxy Bridge → 选择服务器 → 点击“连接并打开 VS Code”。遇到问题时，先点击“运行诊断”，再参阅[完整用户手册](USER_GUIDE.md)中的“常见问题”。
 
 ### 从源码运行
 
