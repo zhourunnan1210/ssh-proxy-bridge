@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="500" viewBox="0 0 1440 500" role="img" aria-labelledby="title desc">
+  <title id="title">三步开始使用 SSH Proxy Bridge</title>
+  <desc id="desc">第一步下载并解压，第二步添加服务器，第三步连接并打开 VS Code。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef4ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0f172a" flood-opacity=".11"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0l10 5-10 5z" fill="#91a8cf"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="500" rx="28" fill="url(#bg)"/>
+  <text x="720" y="59" text-anchor="middle" font-size="30" font-weight="700" fill="#14213d" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">第一次使用，只需要三步</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="102" width="380" height="328" rx="24" fill="#fff" stroke="#dbe5f1"/>
+    <rect x="530" y="102" width="380" height="328" rx="24" fill="#fff" stroke="#dbe5f1"/>
+    <rect x="990" y="102" width="380" height="328" rx="24" fill="#fff" stroke="#dbe5f1"/>
+  </g>
+
+  <circle cx="113" cy="144" r="23" fill="#2f6fed"/>
+  <text x="113" y="152" text-anchor="middle" font-size="20" font-weight="700" fill="#fff" font-family="Segoe UI,sans-serif">1</text>
+  <text x="153" y="152" font-size="24" font-weight="700" fill="#172238" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">下载并解压</text>
+  <rect x="127" y="195" width="266" height="112" rx="15" fill="#f5f8fd" stroke="#d9e4f3"/>
+  <path d="M218 215h84l28 28v45h-112z" fill="#e4edfb" stroke="#7090c8" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M302 215v29h28" fill="none" stroke="#7090c8" stroke-width="3"/>
+  <path d="M274 236v34M261 258l13 13 13-13" fill="none" stroke="#2f6fed" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="260" y="344" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">从 Releases 下载 win-x64.zip</text>
+  <text x="260" y="374" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">完整解压后运行 EXE</text>
+
+  <circle cx="573" cy="144" r="23" fill="#2f6fed"/>
+  <text x="573" y="152" text-anchor="middle" font-size="20" font-weight="700" fill="#fff" font-family="Segoe UI,sans-serif">2</text>
+  <text x="613" y="152" font-size="24" font-weight="700" fill="#172238" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">添加服务器</text>
+  <rect x="587" y="190" width="266" height="126" rx="15" fill="#f5f8fd" stroke="#d9e4f3"/>
+  <rect x="612" y="211" width="216" height="25" rx="7" fill="#fff" stroke="#cbd5e1"/>
+  <rect x="612" y="246" width="104" height="25" rx="7" fill="#fff" stroke="#cbd5e1"/>
+  <rect x="727" y="246" width="101" height="25" rx="7" fill="#fff" stroke="#cbd5e1"/>
+  <rect x="692" y="284" width="136" height="18" rx="9" fill="#2f6fed"/>
+  <text x="720" y="344" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">填写 SSH 地址和本机代理端口</text>
+  <text x="720" y="374" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">确认一次服务器指纹</text>
+
+  <circle cx="1033" cy="144" r="23" fill="#2f6fed"/>
+  <text x="1033" y="152" text-anchor="middle" font-size="20" font-weight="700" fill="#fff" font-family="Segoe UI,sans-serif">3</text>
+  <text x="1073" y="152" font-size="24" font-weight="700" fill="#172238" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">点击连接</text>
+  <rect x="1047" y="196" width="266" height="108" rx="15" fill="#f5f8fd" stroke="#d9e4f3"/>
+  <circle cx="1090" cy="232" r="9" fill="#22c55e"/>
+  <rect x="1112" y="220" width="165" height="24" rx="8" fill="#dbe5f1"/>
+  <rect x="1090" y="261" width="187" height="27" rx="9" fill="#2f6fed"/>
+  <text x="1183" y="280" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">连接并打开 VS Code</text>
+  <text x="1180" y="344" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">自动建立代理通道</text>
+  <text x="1180" y="374" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">直接打开远程项目</text>
+
+  <path d="M464 266h47" stroke="#91a8cf" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <path d="M924 266h47" stroke="#91a8cf" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <text x="720" y="468" text-anchor="middle" font-size="17" fill="#64748b" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">之后每天只需启动代理软件，选择服务器，再点击连接</text>
+</svg>
