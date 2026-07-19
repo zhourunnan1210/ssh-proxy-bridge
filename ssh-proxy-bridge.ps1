@@ -159,25 +159,72 @@ function Start-ProxyIfNeeded($Configuration) {
 function Invoke-CurlProbe([string]$ProxyType, [string]$ProxyHost, [int]$ProxyPort) {
     $curl = Get-Executable 'curl.exe' "$env:SystemRoot\System32\curl.exe"
     if (-not $curl) {
-        return [pscustomobject]@{ Success = $false; Status = ''; Detail = 'curl.exe not found' }
+        return [pscustomobject]@{
+            Success = $false
+            Status = ''
+            Detail = 'curl.exe not found'
+            Target = ''
+        }
     }
 
-    $arguments = @('--silent', '--show-error', '--output', 'NUL', '--write-out', '%{http_code}', '--max-time', '12')
-    if ($ProxyType -eq 'socks5') {
-        $arguments += @('--socks5-hostname', "${ProxyHost}:$ProxyPort")
-    }
-    else {
-        $arguments += @('--proxy', "http://${ProxyHost}:$ProxyPort")
-    }
-    $arguments += 'http://cp.cloudflare.com/generate_204'
+    # A single public connectivity endpoint can fail even when the proxy is
+    # healthy. Try independent providers and accept the first expected status.
+    $targets = @(
+        [pscustomobject]@{
+            Name = 'Google connectivity check'
+            Url = 'http://connectivitycheck.gstatic.com/generate_204'
+            ExpectedStatus = '204'
+        },
+        [pscustomobject]@{
+            Name = 'Microsoft connectivity check'
+            Url = 'http://www.msftconnecttest.com/connecttest.txt'
+            ExpectedStatus = '200'
+        },
+        [pscustomobject]@{
+            Name = 'Example.com'
+            Url = 'http://example.com/'
+            ExpectedStatus = '200'
+        }
+    )
 
-    $output = & $curl @arguments 2>&1
-    $exitCode = $LASTEXITCODE
-    $status = (($output | Select-Object -Last 1) -as [string]).Trim()
+    $attempts = @()
+    foreach ($target in $targets) {
+        $arguments = @('--silent', '--show-error', '--output', 'NUL', '--write-out', '%{http_code}', '--max-time', '12')
+        if ($ProxyType -eq 'socks5') {
+            $arguments += @('--socks5-hostname', "${ProxyHost}:$ProxyPort")
+        }
+        else {
+            $arguments += @('--proxy', "http://${ProxyHost}:$ProxyPort")
+        }
+        $arguments += [string]$target.Url
+
+        # ProcessStartInfo keeps curl stderr out of PowerShell's error stream.
+        # Windows PowerShell 5.1 otherwise promotes native stderr to a
+        # terminating NativeCommandError when ErrorActionPreference is Stop.
+        $result = Invoke-NativeProcessWithTimeout $curl $arguments $null 15
+        $status = @(
+            $result.Output |
+                ForEach-Object { ([string]$_).Trim() } |
+                Where-Object { $_ -match '^\d{3}$' } |
+                Select-Object -First 1
+        )
+        $statusText = if ($status.Count -gt 0) { [string]$status[0] } else { '' }
+        $attempts += "$($target.Name):status=$(if ($statusText) { $statusText } else { 'none' }),exit=$($result.ExitCode)"
+        if ($result.ExitCode -eq 0 -and $statusText -eq [string]$target.ExpectedStatus) {
+            return [pscustomobject]@{
+                Success = $true
+                Status = $statusText
+                Detail = "exit=$($result.ExitCode)"
+                Target = [string]$target.Name
+            }
+        }
+    }
+
     return [pscustomobject]@{
-        Success = ($exitCode -eq 0 -and $status -eq '204')
-        Status = $status
-        Detail = "exit=$exitCode"
+        Success = $false
+        Status = ''
+        Detail = ($attempts -join '; ')
+        Target = ''
     }
 }
 
@@ -525,20 +572,58 @@ mv "`$tmp" "`$file"
     Write-Pass 'Remote ~/.bashrc proxy environment block installed.'
 }
 
-function Get-TunnelProcess {
+function Test-ManagedTunnelProcess($Configuration, $Process) {
+    if (-not $Process -or $Process.ProcessName -ne 'ssh') {
+        return $false
+    }
+
+    # When available, verify the exact reverse-forward and SSH alias. Some
+    # restricted Windows sessions cannot read Win32_Process.CommandLine, so
+    # process name/path remain the safe fallback for an app-owned PID file.
+    try {
+        $details = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.Id)" -ErrorAction Stop
+        if ($details) {
+            $remoteSpec = "$($Configuration.ssh.remoteProxyHost):$($Configuration.ssh.remoteProxyPort):$($Configuration.proxy.host):$($Configuration.proxy.port)"
+            $expectedAlias = [string]$Configuration.ssh.alias
+            return $details.Name -eq 'ssh.exe' -and
+                $details.CommandLine -match [regex]::Escape($remoteSpec) -and
+                $details.CommandLine -match [regex]::Escape($expectedAlias)
+        }
+    }
+    catch {
+        # Fall back below. Get-Process still proves that the saved PID belongs
+        # to an ssh.exe process owned by the current Windows session.
+    }
+
+    try {
+        $path = [string]$Process.Path
+        return -not $path -or [IO.Path]::GetFileName($path) -eq 'ssh.exe'
+    }
+    catch {
+        return $true
+    }
+}
+
+function Get-TunnelProcess($Configuration) {
     $pidPath = Get-StatePath 'tunnel.pid'
     if (-not (Test-Path -LiteralPath $pidPath)) {
         return $null
     }
     $savedPid = 0
     if (-not [int]::TryParse((Get-Content -Raw -LiteralPath $pidPath).Trim(), [ref]$savedPid)) {
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
         return $null
     }
-    return Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+    $process = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+    if (-not (Test-ManagedTunnelProcess $Configuration $process)) {
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    return $process
 }
 
 function Stop-Tunnel($Configuration) {
-    $process = Get-TunnelProcess
+    $process = Get-TunnelProcess $Configuration
     $pidPath = Get-StatePath 'tunnel.pid'
     if (-not $process) {
         Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
@@ -546,14 +631,7 @@ function Stop-Tunnel($Configuration) {
         return
     }
 
-    $details = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction SilentlyContinue
-    $expectedPort = [string]$Configuration.ssh.remoteProxyPort
-    $expectedAlias = [string]$Configuration.ssh.alias
-    $isManagedTunnel = $details -and
-        $details.Name -eq 'ssh.exe' -and
-        $details.CommandLine -match [regex]::Escape($expectedPort) -and
-        $details.CommandLine -match [regex]::Escape($expectedAlias)
-    if (-not $isManagedTunnel) {
+    if (-not (Test-ManagedTunnelProcess $Configuration $process)) {
         throw "Refusing to stop PID $($process.Id): it does not match the managed tunnel."
     }
     Stop-Process -Id $process.Id -Force
@@ -562,7 +640,7 @@ function Stop-Tunnel($Configuration) {
 }
 
 function Start-Tunnel($Configuration) {
-    $existing = Get-TunnelProcess
+    $existing = Get-TunnelProcess $Configuration
     if ($existing) {
         Write-Pass "SSH tunnel is already running (PID $($existing.Id))."
         return $existing
@@ -597,10 +675,35 @@ function Start-Tunnel($Configuration) {
 
 function Test-RemoteProxy($Configuration) {
     $url = "http://$($Configuration.ssh.remoteProxyHost):$($Configuration.ssh.remoteProxyPort)"
-    $command = 'code=$(curl -sS -o /dev/null -w ''%{http_code}'' --max-time 15 --proxy ''' + $url + ''' http://cp.cloudflare.com/generate_204); test "$code" = 204 && printf CODEX_REMOTE_PROXY_OK'
+    $urlBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($url))
+    $script = @'
+set -u
+proxy=$(printf %s __PROXY_BASE64__ | base64 -d)
+probe() {
+    name="$1"
+    target="$2"
+    expected="$3"
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 --proxy "$proxy" "$target" 2>/dev/null || true)
+    if [ "$code" = "$expected" ]; then
+        printf 'CODEX_REMOTE_PROXY_OK:%s:%s\n' "$name" "$code"
+        exit 0
+    fi
+    printf 'PROBE_FAILED:%s:%s\n' "$name" "${code:-none}"
+}
+probe gstatic http://connectivitycheck.gstatic.com/generate_204 204
+probe microsoft http://www.msftconnecttest.com/connecttest.txt 200
+probe example http://example.com/ 200
+exit 1
+'@
+    $script = $script.Replace('__PROXY_BASE64__', $urlBase64)
+    $scriptBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
+    $command = "printf %s $scriptBase64 | base64 -d | bash"
     $result = Invoke-Ssh $Configuration $command -UseAlias
     $ok = ($result.ExitCode -eq 0 -and ($result.Output -join '') -match 'CODEX_REMOTE_PROXY_OK')
-    if ($ok) { Write-Pass 'The server can reach the internet through the Windows proxy tunnel.' }
+    if ($ok) {
+        $marker = (($result.Output | Where-Object { $_ -match 'CODEX_REMOTE_PROXY_OK' } | Select-Object -First 1) -as [string]).Trim()
+        Write-Pass "The server can reach the internet through the Windows proxy tunnel ($marker)."
+    }
     else { Write-Fail "Remote proxy validation failed: $($result.Output -join ' ')" }
     return $ok
 }
@@ -661,8 +764,26 @@ function Invoke-Doctor($Configuration) {
 
     $http = Invoke-CurlProbe 'http' ([string]$Configuration.proxy.host) ([int]$Configuration.proxy.port)
     $socks = Invoke-CurlProbe 'socks5' ([string]$Configuration.proxy.host) ([int]$Configuration.proxy.port)
-    if ($http.Success) { Write-Pass 'HTTP proxy probe returned 204.' } else { Write-Fail "HTTP proxy probe failed ($($http.Detail), status=$($http.Status))."; $failures++ }
-    if ($socks.Success) { Write-Pass 'SOCKS5 proxy probe returned 204.' } else { Write-Warn "SOCKS5 probe failed ($($socks.Detail), status=$($socks.Status))." }
+    if ($http.Success) {
+        if ($http.Status -eq '204') {
+            # Preserve the original marker so an already-running GUI from an
+            # older release can still recognize the successful diagnosis.
+            Write-Pass "HTTP proxy probe returned 204 via $($http.Target)."
+        }
+        else {
+            Write-Pass "HTTP proxy probe succeeded via $($http.Target) (status $($http.Status))."
+        }
+    }
+    else {
+        Write-Fail "HTTP proxy probe failed ($($http.Detail))."
+        $failures++
+    }
+    if ($socks.Success) {
+        Write-Pass "SOCKS5 proxy probe succeeded via $($socks.Target) (status $($socks.Status))."
+    }
+    else {
+        Write-Warn "SOCKS5 probe failed ($($socks.Detail))."
+    }
 
     Write-Step 'Checking SSH target'
     if (Test-TcpPort ([string]$Configuration.ssh.host) ([int]$Configuration.ssh.port) 5000) {
@@ -679,6 +800,18 @@ function Invoke-Doctor($Configuration) {
     }
     else {
         Write-Warn "SSH key has not been created yet: $keyPath"
+    }
+
+    Write-Step 'Checking managed reverse tunnel'
+    $tunnel = Get-TunnelProcess $Configuration
+    if ($tunnel) {
+        Write-Pass "Managed SSH tunnel is running (PID $($tunnel.Id))."
+        if (-not (Test-RemoteProxy $Configuration)) {
+            $failures++
+        }
+    }
+    else {
+        Write-Warn 'Managed SSH tunnel is not running. Use start to establish it.'
     }
 
     Write-Step 'Checking VS Code extensions'
@@ -755,7 +888,7 @@ try {
         }
         'status' {
             $proxyOk = Test-TcpPort ([string]$configuration.proxy.host) ([int]$configuration.proxy.port)
-            $tunnel = Get-TunnelProcess
+            $tunnel = Get-TunnelProcess $configuration
             Write-Host "Proxy:  $(if ($proxyOk) { 'running' } else { 'not ready' })"
             Write-Host "Tunnel: $(if ($tunnel) { "running (PID $($tunnel.Id))" } else { 'stopped' })"
             Write-Host "SSH key login: $(if (Test-KeyLogin $configuration -Quiet) { 'ready' } else { 'not ready' })"

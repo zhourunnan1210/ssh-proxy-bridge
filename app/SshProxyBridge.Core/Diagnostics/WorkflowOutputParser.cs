@@ -12,6 +12,9 @@ public static partial class WorkflowOutputParser
         return string.Equals(command, "start", StringComparison.OrdinalIgnoreCase)
                || ProxyReadyLineRegex().IsMatch(output)
                || output.Contains(
+                   "HTTP proxy probe succeeded",
+                   StringComparison.OrdinalIgnoreCase)
+               || output.Contains(
                    "HTTP proxy probe returned 204",
                    StringComparison.OrdinalIgnoreCase);
     }

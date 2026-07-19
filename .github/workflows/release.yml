@@ -63,10 +63,17 @@ jobs:
           if ($assets.Count -lt 2) {
             throw 'Release assets are incomplete.'
           }
+          $notesPath = ".github/release-notes/$env:GITHUB_REF_NAME.md"
+          $notesArguments = if (Test-Path -LiteralPath $notesPath) {
+            @('--notes-file', $notesPath)
+          }
+          else {
+            @('--generate-notes')
+          }
           gh release create $env:GITHUB_REF_NAME @assets `
             --repo $env:GITHUB_REPOSITORY `
             --verify-tag `
-            --generate-notes `
+            @notesArguments `
             --title "SSH Proxy Bridge $env:GITHUB_REF_NAME"
           if ($LASTEXITCODE -ne 0) {
             throw "gh release create failed with exit code $LASTEXITCODE."

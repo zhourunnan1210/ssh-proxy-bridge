@@ -27,6 +27,31 @@ function Assert-ChildPath([string]$Candidate, [string]$Parent) {
     }
 }
 
+function Compress-ArchiveWithRetry(
+    [string]$Source,
+    [string]$Destination,
+    [int]$MaximumAttempts = 8
+) {
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            Compress-Archive -Path $Source -DestinationPath $Destination -CompressionLevel Optimal -ErrorAction Stop
+            return
+        }
+        catch {
+            if (Test-Path -LiteralPath $Destination) {
+                Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            }
+            if ($attempt -eq $MaximumAttempts) {
+                throw
+            }
+
+            # A just-executed single-file app can remain locked briefly while
+            # Windows finishes process cleanup or security scanning.
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
+}
+
 Assert-ChildPath $publishDirectory $releaseRoot
 Assert-ChildPath $zipPath $releaseRoot
 Assert-ChildPath $zipChecksumPath $releaseRoot
@@ -97,7 +122,7 @@ try {
         $hashLine + [Environment]::NewLine,
         [Text.UTF8Encoding]::new($false))
 
-    Compress-Archive -Path (Join-Path $publishDirectory '*') -DestinationPath $zipPath -CompressionLevel Optimal
+    Compress-ArchiveWithRetry (Join-Path $publishDirectory '*') $zipPath
     $zipHash = Get-FileHash -LiteralPath $zipPath -Algorithm SHA256
     [IO.File]::WriteAllText(
         $zipChecksumPath,

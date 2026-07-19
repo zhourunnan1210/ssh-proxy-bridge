@@ -163,8 +163,18 @@ static Task TestProxyStatusParsing()
         "Tab-separated running status was not recognized.");
     Assert(!WorkflowOutputParser.IsProxyReady("status", "Proxy:  not ready"),
         "Not-ready proxy status was incorrectly accepted.");
-    Assert(WorkflowOutputParser.IsProxyReady("doctor", "[PASS] HTTP proxy probe returned 204."),
+    Assert(WorkflowOutputParser.IsProxyReady(
+            "doctor",
+            "[PASS] HTTP proxy probe succeeded via Google connectivity check (status 204)."),
         "Successful diagnostic proxy probe was not recognized.");
+    Assert(WorkflowOutputParser.IsProxyReady(
+            "doctor",
+            "[PASS] HTTP proxy probe returned 204 via Google connectivity check."),
+        "Legacy-compatible diagnostic proxy marker was not recognized.");
+    Assert(!WorkflowOutputParser.IsProxyReady(
+            "doctor",
+            "[FAIL] HTTP proxy probe failed (Google connectivity check:status=502,exit=0)."),
+        "Failed diagnostic proxy probe was incorrectly accepted.");
     return Task.CompletedTask;
 }
 
