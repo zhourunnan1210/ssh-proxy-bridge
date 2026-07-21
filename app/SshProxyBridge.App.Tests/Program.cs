@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using SshProxyBridge.App;
+using SshProxyBridge.Core.Security;
 
 namespace SshProxyBridge.App.Tests;
 
@@ -144,6 +145,9 @@ internal static class Program
             }
             Console.WriteLine("PASS  A detached child cannot hold the GUI output drain open indefinitely.");
 
+            TestAskPassHelper();
+            Console.WriteLine("PASS  AskPass returns only the requested app-owned Windows credential.");
+
             productButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             if (productPage.Visibility != Visibility.Visible
                 || serverPage.Visibility != Visibility.Collapsed
@@ -168,6 +172,40 @@ internal static class Program
         {
             Console.Error.WriteLine($"FAIL  Markdown reader: {exception.GetType().Name}: {exception.Message}");
             return 1;
+        }
+    }
+
+    private static void TestAskPassHelper()
+    {
+        var reference = CredentialReference.SshPassword(Guid.NewGuid());
+        var store = new WindowsCredentialStore();
+        var secret = $"temporary-{Guid.NewGuid():N}";
+        var executablePath = System.IO.Path.ChangeExtension(typeof(App).Assembly.Location, ".exe");
+
+        try
+        {
+            store.SaveAsync(reference, "askpass-test", secret).GetAwaiter().GetResult();
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = executablePath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            startInfo.Environment["SSH_PROXY_BRIDGE_ASKPASS"] = "1";
+            startInfo.Environment["SSH_PROXY_BRIDGE_CREDENTIAL_TARGET"] = reference.TargetName;
+
+            using var process = System.Diagnostics.Process.Start(startInfo)
+                ?? throw new InvalidOperationException("AskPass helper did not start.");
+            var output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit(10000);
+            if (!process.HasExited || process.ExitCode != 0 || output != secret)
+                throw new InvalidOperationException("AskPass helper did not return the stored test credential.");
+        }
+        finally
+        {
+            store.DeleteAsync(reference).GetAwaiter().GetResult();
         }
     }
 

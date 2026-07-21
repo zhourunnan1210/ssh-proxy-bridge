@@ -28,6 +28,22 @@ public readonly record struct CredentialReference(string TargetName)
     public static CredentialReference LegacySshPassword(Guid profileId) =>
         new($"{LegacyPrefix}{profileId:D}");
 
+    public static bool TryParseSshPassword(
+        string? targetName,
+        out CredentialReference reference)
+    {
+        if (!string.IsNullOrWhiteSpace(targetName)
+            && targetName.StartsWith(CurrentPrefix, StringComparison.Ordinal)
+            && Guid.TryParse(targetName[CurrentPrefix.Length..], out _))
+        {
+            reference = new CredentialReference(targetName);
+            return true;
+        }
+
+        reference = default;
+        return false;
+    }
+
     public bool TryGetLegacyEquivalent(out CredentialReference legacyReference)
     {
         if (TargetName.StartsWith(CurrentPrefix, StringComparison.Ordinal)

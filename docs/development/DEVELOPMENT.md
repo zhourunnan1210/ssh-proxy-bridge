@@ -1,23 +1,29 @@
-# SSH Proxy Bridge GUI
+# SSH Proxy Bridge 开发说明
 
 这是一个面向 Windows + VS Code Remote-SSH 场景的 WPF 原型。它把本机代理通过 SSH 反向隧道提供给服务器，并直接在 VS Code 中打开指定的远程目录。
 
 ## 启动
 
-双击工具根目录中的：
+日常只双击工具根目录中的：
+
+```text
+SshProxyBridge.exe
+```
+
+首次拉取源码、根目录尚无 EXE，或代码修改后需要重建时，运行：
 
 ```text
 start-ssh-proxy-bridge-gui.cmd
 ```
 
-启动脚本会先执行增量构建，再打开 Windows 应用，以确保本地代码更新能够生效；检测到应用已运行时不会重复启动。当前原型使用本机已有的 .NET 8，正式发行版计划提供自包含安装包。
+启动脚本会生成最新的 Windows x64 自包含单文件程序，把它同步为根目录唯一日常入口，再打开应用；检测到同一入口已运行时不会重复启动。`app/**/bin`、`app/**/obj` 和 `release` 都不是日常入口。
 
 ## 新服务器的完整流程
 
 1. 点击“添加服务器”，填写 SSH 地址、端口、用户名、服务器密码、本机代理端口和远程项目目录。
 2. 应用显示 SSH SHA256 主机指纹。应先核对指纹，再选择信任。
 3. 密码认证成功后，Profile 进入“密码已验证”状态。若选择保存密码，密码只写入 Windows Credential Manager。
-4. 选中该 Profile，点击“完成 SSH 初始化”。应用会生成每服务器专用 ED25519 Key、限制私钥 ACL、幂等安装公钥并执行 Key-only 登录验证。
+4. 选中该 Profile，点击“完成 SSH 初始化”。应用会探测认证方式：普通服务器生成独立 ED25519 Key 并验证 Key-only 登录；只提供 `password` 的云平台网关切换到受控 AskPass 模式。
 5. 初始化成功后，点击“连接并打开 VS Code”。应用会建立反向隧道、验证服务器代理、写入受管的远程 Shell 代理块，并打开配置的远程目录。
 
 初始化时应用会先检查用户填写的服务器代理端口。若该端口已被旧隧道或其他程序占用，会从该 Profile 的配置范围内选择下一个可绑定端口，并把结果保存到 Profile 和运行配置。
@@ -48,6 +54,7 @@ start-ssh-proxy-bridge-gui.cmd
 
 - Profile 和运行时 JSON 不包含密码。
 - 保存密码使用 Windows Credential Manager，而不是注册表、普通文件、命令行或日志。
+- 密码网关由受控 AskPass Helper 按需读取 Profile 凭据，运行配置只包含凭据引用。
 - 首次连接要求人工确认主机指纹；后续密码、公钥安装和 Key-only 验证均固定到该 SHA256 指纹。
 - 每个新 Profile 使用应用专属 `known_hosts`，并启用 `StrictHostKeyChecking yes`。
 - 公钥安装只追加缺失的精确行，不删除或覆盖服务器已有的 `authorized_keys`。
@@ -73,11 +80,11 @@ start-ssh-proxy-bridge-gui.cmd
 
 ## 当前限制
 
-- 自动初始化目前只支持“一键模式”。带口令私钥需要安全的 AskPass/ssh-agent 交互，将在后续阶段实现。
+- 自动初始化支持“一键无口令 Key”和密码网关；带口令私钥仍需要后续接入 ssh-agent 交互。
 - 编辑暂不支持修改 SSH 地址、用户或重新确认主机指纹；需要更换 SSH 身份时应新建 Profile。
 - 删除暂不自动清理服务器端 `authorized_keys` 和远程 Shell 代理块。
 - 远端端口自动选择目前发生在首次 SSH 初始化；隧道停止后若端口后来被其他程序占用，连接会安全失败并给出错误，尚不会在每次连接时自动改写端口。
-- 当前仍复用 PowerShell 连接引擎，尚未制作自包含安装包或签名发行版本。
+- 当前仍复用 PowerShell 连接引擎，已提供自包含便携包，但尚未提供商业代码签名。
 
 ## 开发验证
 
@@ -88,14 +95,14 @@ dotnet run --project .\SshProxyBridge.Core.Tests\SshProxyBridge.Core.Tests.cspro
 dotnet build .\SshProxyBridge.App\SshProxyBridge.App.csproj --configuration Release
 ```
 
-当前基线：Core 测试 `16/16` 通过；界面冒烟测试已验证添加、编辑、删除、密码、通知和使用说明均在主窗口内呈现，并验证代理状态与原位导航；Release 构建 `0` 警告、`0` 错误。迁移测试验证旧数据只复制不删除，凭据测试只创建随机虚拟凭据，并在 `finally` 中立即删除。
+当前基线：Core 测试 `18/18` 通过；界面冒烟测试已验证添加、编辑、删除、密码、通知和使用说明均在主窗口内呈现，并验证代理状态、原位导航与 AskPass 凭据读取；Release 构建 `0` 错误。迁移测试验证旧数据只复制不删除，凭据测试只创建随机虚拟凭据，并在 `finally` 中立即删除。
 
 ## 生成 Windows 便携版
 
 在工具根目录运行：
 
 ```powershell
-.\publish-portable.ps1
+.\scripts\build\publish-portable.ps1
 ```
 
-脚本生成 Windows x64 自包含单文件主程序、必需脚本、用户手册、EXE/ZIP SHA256 和可直接分发的 ZIP。目标电脑不需要安装 .NET。开发电脑的 `config.local.json` 不会进入发布包；发布脚本会用 `--verify-package` 无界面模式验证最终 EXE 和资源完整性。
+脚本从项目文件自动读取版本号，生成 Windows x64 自包含单文件主程序、必需脚本、用户手册、EXE/ZIP SHA256 和可直接分发的 ZIP，并把同一 EXE 同步到仓库根目录。它会清理本机 `release` 中的历史版本，只保留当前版本。目标电脑不需要安装 .NET。开发电脑的 `config.local.json` 不会进入发布包；发布脚本会用 `--verify-package` 无界面模式验证最终 EXE 和资源完整性。

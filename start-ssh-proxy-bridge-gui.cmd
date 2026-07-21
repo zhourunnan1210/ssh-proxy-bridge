@@ -1,33 +1,30 @@
 @echo off
 setlocal
 set "ROOT=%~dp0"
-set "PROJECT=%ROOT%app\SshProxyBridge.App\SshProxyBridge.App.csproj"
-set "APP=%ROOT%app\SshProxyBridge.App\bin\Release\net8.0-windows\SshProxyBridge.exe"
-set "ASSETS=%ROOT%app\SshProxyBridge.App\obj\project.assets.json"
+set "APP=%ROOT%SshProxyBridge.exe"
 
-powershell.exe -NoLogo -NoProfile -NonInteractive -Command "if (Get-Process -Name 'SshProxyBridge' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
-if not errorlevel 1 (
-  echo SSH Proxy Bridge is already running.
-  exit /b 0
-)
+powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$app='%APP%'; if (-not (Test-Path -LiteralPath $app)) { exit 1 }; $appTime=(Get-Item -LiteralPath $app).LastWriteTimeUtc; $latest=Get-ChildItem -LiteralPath '%ROOT%app\SshProxyBridge.App','%ROOT%app\SshProxyBridge.Core' -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1; if ($latest -and $latest.LastWriteTimeUtc -gt $appTime) { exit 1 }; exit 0"
+set "GUI_CURRENT=%ERRORLEVEL%"
 
-if not exist "%ASSETS%" (
-  dotnet restore "%PROJECT%" --nologo
+if not "%GUI_CURRENT%"=="0" (
+  echo The local GUI is missing or older than the source. Building the current version...
+  powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$app=[IO.Path]::GetFullPath('%APP%'); Get-Process -Name 'SshProxyBridge' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $app } | Stop-Process -Force"
+  powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\build\publish-portable.ps1"
   if errorlevel 1 (
     echo.
-    echo Failed to restore SSH Proxy Bridge dependencies.
+    echo Failed to build the current SSH Proxy Bridge GUI.
     pause
     exit /b 1
   )
 )
 
-dotnet build "%PROJECT%" --configuration Release --nologo --no-restore
-if errorlevel 1 (
-  echo.
-  echo Failed to build SSH Proxy Bridge.
-  pause
-  exit /b 1
+powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$app=[IO.Path]::GetFullPath('%APP%'); $running=Get-Process -Name 'SshProxyBridge' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $app }; if ($running) { exit 0 } else { exit 1 }"
+if not errorlevel 1 (
+  echo SSH Proxy Bridge is already running.
+  exit /b 0
 )
+
+powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$app=[IO.Path]::GetFullPath('%APP%'); Get-Process -Name 'SshProxyBridge' -ErrorAction SilentlyContinue | Where-Object { $_.Path -ne $app } | Stop-Process -Force"
 
 start "" "%APP%"
 endlocal

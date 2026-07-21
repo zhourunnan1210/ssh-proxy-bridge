@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using SshProxyBridge.Core.Models;
+using SshProxyBridge.Core.Security;
 
 namespace SshProxyBridge.Core.Profiles;
 
@@ -16,7 +17,14 @@ public static partial class ProfileValidator
         Required(profile.Ssh.User, "SSH 用户", errors);
         Required(profile.Ssh.Alias, "SSH 别名", errors);
         Required(profile.Proxy.Host, "代理地址", errors);
-        Required(profile.Ssh.IdentityFile, "SSH 私钥路径", errors);
+        if (profile.Ssh.Authentication != AuthenticationMode.PasswordGateway)
+            Required(profile.Ssh.IdentityFile, "SSH 私钥路径", errors);
+
+        if (profile.Ssh.Authentication == AuthenticationMode.PasswordGateway
+            && !CredentialReference.TryParseSshPassword(profile.Ssh.CredentialRef, out _))
+        {
+            errors.Add("密码网关模式需要有效的 Windows 凭据引用。");
+        }
 
         Port(profile.Ssh.Port, "SSH 端口", errors);
         Port(profile.Proxy.Port, "本机代理端口", errors);

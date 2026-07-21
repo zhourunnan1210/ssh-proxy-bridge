@@ -1,6 +1,8 @@
 using System.IO;
+using System.Text;
 using System.Windows;
 using SshProxyBridge.Core.Profiles;
+using SshProxyBridge.Core.Security;
 
 namespace SshProxyBridge.App;
 
@@ -18,6 +20,15 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("SSH_PROXY_BRIDGE_ASKPASS"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            Shutdown(WriteAskPassResponse() ? 0 : 3);
+            return;
+        }
+
         if (e.Args.Any(argument =>
                 string.Equals(argument, "--verify-package", StringComparison.OrdinalIgnoreCase)))
         {
@@ -42,6 +53,39 @@ public partial class App : Application
         }
 
         base.OnStartup(e);
+    }
+
+    private static bool WriteAskPassResponse()
+    {
+        var target = Environment.GetEnvironmentVariable(
+            "SSH_PROXY_BRIDGE_CREDENTIAL_TARGET");
+        if (!CredentialReference.TryParseSshPassword(target, out var reference))
+            return false;
+
+        try
+        {
+            var credential = new WindowsCredentialStore()
+                .ReadAsync(reference)
+                .GetAwaiter()
+                .GetResult();
+            if (credential is null)
+                return false;
+
+            using var writer = new StreamWriter(
+                Console.OpenStandardOutput(),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                leaveOpen: false);
+            writer.Write(credential.Secret);
+            writer.Flush();
+            credential = null;
+            return true;
+        }
+        catch
+        {
+            // AskPass must never show a second UI or print diagnostic details:
+            // OpenSSH treats any stdout text as the password response.
+            return false;
+        }
     }
 
     internal static LegacyDataMigrationResult? LegacyMigration { get; private set; }

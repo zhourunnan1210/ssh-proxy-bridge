@@ -3,16 +3,23 @@ param(
     [string]$Configuration = 'Release',
     [ValidatePattern('^[0-9A-Za-z.-]+$')]
     [string]$Runtime = 'win-x64',
-    [ValidatePattern('^[0-9A-Za-z.-]+$')]
-    [string]$Version = '0.1.0'
+    [string]$Version = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$root = $PSScriptRoot
+$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $project = Join-Path $root 'app\SshProxyBridge.App\SshProxyBridge.App.csproj'
+$localExecutable = Join-Path $root 'SshProxyBridge.exe'
 $releaseRoot = Join-Path $root 'release'
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    [xml]$projectXml = Get-Content -Raw -LiteralPath $project
+    $Version = [string]($projectXml.Project.PropertyGroup.Version | Select-Object -First 1)
+}
+if ($Version -notmatch '^[0-9A-Za-z.-]+$') {
+    throw "Invalid application version in project file: $Version"
+}
 $packageName = "SSH-Proxy-Bridge-v$Version-$Runtime"
 $publishDirectory = Join-Path $releaseRoot $packageName
 $zipPath = Join-Path $releaseRoot "$packageName.zip"
@@ -56,6 +63,13 @@ Assert-ChildPath $publishDirectory $releaseRoot
 Assert-ChildPath $zipPath $releaseRoot
 Assert-ChildPath $zipChecksumPath $releaseRoot
 Assert-ChildPath $artifactsDirectory $env:TEMP
+
+$runningLocalGui = Get-Process -Name 'SshProxyBridge' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -eq $localExecutable } |
+    Select-Object -First 1
+if ($runningLocalGui) {
+    throw 'Close the root SshProxyBridge.exe window before rebuilding the local GUI.'
+}
 
 if (-not (Test-Path -LiteralPath $releaseRoot)) {
     New-Item -ItemType Directory -Path $releaseRoot | Out-Null
@@ -115,6 +129,8 @@ try {
         throw "Portable package self-check failed with exit code $($verification.ExitCode)."
     }
 
+    Copy-Item -LiteralPath $executable -Destination $localExecutable -Force
+
     $hash = Get-FileHash -LiteralPath $executable -Algorithm SHA256
     $hashLine = "$($hash.Hash.ToLowerInvariant())  SshProxyBridge.exe"
     [IO.File]::WriteAllText(
@@ -129,10 +145,26 @@ try {
         "$($zipHash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($zipPath))" + [Environment]::NewLine,
         [Text.UTF8Encoding]::new($false))
 
+    $currentArtifacts = @(
+        $publishDirectory,
+        $zipPath,
+        $zipChecksumPath
+    ) | ForEach-Object { [IO.Path]::GetFullPath($_) }
+    Get-ChildItem -LiteralPath $releaseRoot -Force |
+        Where-Object {
+            ($_.Name -like 'SSH-Proxy-Bridge-*' -or $_.Name -like 'CodexRemoteBridge-*') -and
+            $_.FullName -notin $currentArtifacts
+        } |
+        ForEach-Object {
+            Assert-ChildPath $_.FullName $releaseRoot
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force
+        }
+
     Write-Host ''
     Write-Host 'Portable package created:' -ForegroundColor Green
     Write-Host "  Folder: $publishDirectory"
     Write-Host "  ZIP:    $zipPath"
+    Write-Host "  Local:  $localExecutable"
     Write-Host "  EXE SHA256: $($hash.Hash.ToLowerInvariant())"
     Write-Host "  ZIP SHA256: $($zipHash.Hash.ToLowerInvariant())"
 }

@@ -1,20 +1,26 @@
 using System.Text.Json;
 using SshProxyBridge.Core.Models;
+using SshProxyBridge.Core.Security;
 
 namespace SshProxyBridge.Core.Profiles;
 
 public sealed class ProfileRuntimeWriter
 {
     private readonly string _baseDirectory;
+    private readonly string _askPassExecutablePath;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true
     };
 
-    public ProfileRuntimeWriter(string? baseDirectory = null)
+    public ProfileRuntimeWriter(
+        string? baseDirectory = null,
+        string? askPassExecutablePath = null)
     {
         _baseDirectory = baseDirectory ?? AppDataPaths.ProfilesDirectory;
+        _askPassExecutablePath = askPassExecutablePath
+            ?? Path.Combine(AppContext.BaseDirectory, "SshProxyBridge.exe");
     }
 
     public string GetRuntimeConfigPath(Guid profileId) =>
@@ -58,7 +64,19 @@ public sealed class ProfileRuntimeWriter
                 host = profile.Ssh.Host,
                 port = profile.Ssh.Port,
                 user = profile.Ssh.User,
+                authentication = profile.Ssh.Authentication switch
+                {
+                    AuthenticationMode.PasswordGateway => "passwordGateway",
+                    AuthenticationMode.ExistingKey => "existingKey",
+                    _ => "managedKey"
+                },
                 identityFile = profile.Ssh.IdentityFile,
+                credentialTarget = profile.Ssh.Authentication == AuthenticationMode.PasswordGateway
+                    ? GetCredentialTarget(profile)
+                    : string.Empty,
+                askPassExecutable = profile.Ssh.Authentication == AuthenticationMode.PasswordGateway
+                    ? _askPassExecutablePath
+                    : string.Empty,
                 remoteProxyHost = profile.Remote.ProxyHost,
                 remoteProxyPort = profile.Remote.ProxyPort,
                 userKnownHostsFile = knownHostsPath
@@ -78,6 +96,15 @@ public sealed class ProfileRuntimeWriter
 
     private string GetProfileDirectory(Guid profileId) =>
         Path.Combine(_baseDirectory, profileId.ToString("D"));
+
+    private static string GetCredentialTarget(ConnectionProfile profile)
+    {
+        var target = profile.Ssh.CredentialRef
+            ?? CredentialReference.SshPassword(profile.Id).TargetName;
+        if (!CredentialReference.TryParseSshPassword(target, out _))
+            throw new InvalidOperationException("密码网关 Profile 缺少有效的 Windows 凭据引用。");
+        return target;
+    }
 
     private static void ValidateHostKey(ConnectionProfile profile)
     {

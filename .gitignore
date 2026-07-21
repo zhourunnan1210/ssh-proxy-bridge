@@ -4,6 +4,7 @@ config.local.json
 app/**/bin/
 app/**/obj/
 release/
+SshProxyBridge.exe
 .vs/
 *.user
 *.suo

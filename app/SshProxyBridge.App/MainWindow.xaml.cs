@@ -542,12 +542,6 @@ public partial class MainWindow : Window
 
         try
         {
-            SetState("正在准备专用 Key", StateKind.Working);
-            LogTextBox.Text = "正在生成或检查每服务器专用 ED25519 Key…";
-            var key = await _keyManager.EnsureOneClickKeyAsync(
-                profile.Ssh.IdentityFile,
-                profile.Id);
-
             if (string.IsNullOrWhiteSpace(profile.Ssh.HostKeyAlgorithm)
                 || string.IsNullOrWhiteSpace(profile.Ssh.HostKeyBase64))
             {
@@ -561,6 +555,92 @@ public partial class MainWindow : Window
                 profile.Ssh.HostKeyAlgorithm = authentication.HostKey.Algorithm;
                 profile.Ssh.HostKeyBase64 = authentication.HostKey.KeyBase64;
             }
+
+            SetState("正在识别认证方式", StateKind.Working);
+            LogTextBox.Text = "正在读取 SSH 网关允许的认证方式…";
+            var capabilities = await _bootstrapService
+                .ProbeAuthenticationCapabilitiesAsync(profile);
+
+            if (capabilities.RequiresPasswordGateway)
+            {
+                if (storedCredential is null && !savePasswordAfterSuccess)
+                {
+                    throw new InvalidOperationException(
+                        "该 SSH 网关只允许密码认证。为了让后台隧道可以自动重连，" +
+                        "请重试并勾选“将密码保存到 Windows 凭据管理器”。");
+                }
+
+                profile.Ssh.Authentication = AuthenticationMode.PasswordGateway;
+                profile.Ssh.CredentialRef = credentialReference.TargetName;
+
+                SetState("正在选择远端端口", StateKind.Working);
+                LogTextBox.Text =
+                    $"已识别密码网关。正在检查服务器 127.0.0.1:{profile.Remote.ProxyPort}；" +
+                    "如被占用，将从配置范围内自动选择…";
+                var passwordGatewayPort = await _bootstrapService
+                    .SelectAvailableRemotePortWithPasswordAsync(profile, password);
+                profile.Remote.ProxyPort = passwordGatewayPort;
+
+                var savedForGateway = false;
+                try
+                {
+                    if (storedCredential is null)
+                    {
+                        await _credentialStore.SaveAsync(
+                            credentialReference,
+                            profile.Ssh.User,
+                            password);
+                        savedForGateway = true;
+                    }
+
+                    profile.Ssh.HasStoredCredential = true;
+                    profile.Status = ProfileStatus.Ready;
+
+                    SetState("正在生成运行配置", StateKind.Working);
+                    LogTextBox.Text =
+                        "正在写入专属 known_hosts 和凭据引用；运行配置不会包含明文密码…";
+                    var gatewayArtifacts = await _runtimeWriter.WriteAsync(profile);
+                    await _profileStore.UpsertAsync(profile);
+
+                    await LoadProfilesAsync(profile.Id);
+                    SetState("可以连接", StateKind.Connected);
+                    LogTextBox.Text =
+                        "SSH 初始化完成。\n" +
+                        "认证方式：密码网关（密码保存在 Windows 凭据管理器）\n" +
+                        $"服务器代理端口：127.0.0.1:{passwordGatewayPort}\n" +
+                        $"运行配置：{gatewayArtifacts.RuntimeConfigPath}\n" +
+                        $"主机密钥：{gatewayArtifacts.KnownHostsPath}\n\n" +
+                        "现在可以点击“连接并打开 VS Code”。首次打开该服务器时，" +
+                        "VS Code Remote-SSH 仍可能显示自己的密码输入框。";
+                    return;
+                }
+                catch
+                {
+                    if (savedForGateway)
+                    {
+                        await _credentialStore.DeleteAsync(credentialReference);
+                        profile.Ssh.HasStoredCredential = false;
+                    }
+
+                    throw;
+                }
+            }
+
+            if (!capabilities.SupportsPublicKey)
+            {
+                var offered = capabilities.Methods.Count == 0
+                    ? "未返回任何认证方式"
+                    : string.Join(", ", capabilities.Methods);
+                throw new InvalidOperationException(
+                    $"该 SSH 服务不支持公钥认证，也不是可接管的密码网关。服务器返回：{offered}。");
+            }
+
+            profile.Ssh.Authentication = AuthenticationMode.ManagedKey;
+            SetState("正在准备专用 Key", StateKind.Working);
+            LogTextBox.Text = "正在生成或检查每服务器专用 ED25519 Key…";
+            var key = await _keyManager.EnsureOneClickKeyAsync(
+                profile.Ssh.IdentityFile,
+                profile.Id);
 
             SetState("正在安装公钥", StateKind.Working);
             LogTextBox.Text = "正在幂等安装公钥；不会删除或覆盖服务器已有 authorized_keys…";
