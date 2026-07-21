@@ -201,6 +201,10 @@ static Task TestProxyStatusParsing()
             "doctor",
             "[FAIL] HTTP proxy probe failed (Google connectivity check:status=502,exit=0)."),
         "Failed diagnostic proxy probe was incorrectly accepted.");
+    Assert(WorkflowOutputParser.IsProxyReady(
+            "repair",
+            "[PASS] Tunnel repair and automatic monitoring are ready."),
+        "A successful repair command did not preserve the local proxy indicator.");
     return Task.CompletedTask;
 }
 

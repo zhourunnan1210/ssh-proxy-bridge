@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('doctor', 'bootstrap-key', 'setup', 'start', 'status', 'stop', 'uninstall')]
+    [ValidateSet('doctor', 'bootstrap-key', 'setup', 'start', 'repair', 'monitor', 'status', 'stop', 'uninstall')]
     [string]$Command = 'doctor',
 
     [string]$Config,
@@ -758,6 +758,245 @@ function Stop-Tunnel($Configuration) {
     Write-Pass "Stopped SSH tunnel PID $($process.Id)."
 }
 
+function Get-TunnelFailureSummary {
+    $stderr = Get-StatePath 'tunnel.stderr.log'
+    if (-not (Test-Path -LiteralPath $stderr -PathType Leaf)) {
+        return 'The managed SSH process is not running.'
+    }
+
+    $summary = ((Get-Content -LiteralPath $stderr -Tail 5 -ErrorAction SilentlyContinue) -join ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($summary)) {
+        return 'The managed SSH process exited without an error message.'
+    }
+    if ($summary.Length -gt 400) {
+        $summary = $summary.Substring(0, 400)
+    }
+    return $summary
+}
+
+function Write-MonitorEvent([string]$Message, [string]$Level = 'INFO') {
+    $path = Get-StatePath 'monitor.events.log'
+    try {
+        if ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-Item -LiteralPath $path).Length -gt 1MB) {
+            $previous = Get-StatePath 'monitor.events.previous.log'
+            Move-Item -LiteralPath $path -Destination $previous -Force
+        }
+        $safe = ($Message -replace '[\r\n]+', ' ').Trim()
+        $safe = $safe -replace '(?i)(password|passwd|pwd)\s*[:=]\s*\S+', '$1=<redacted>'
+        Add-Content -LiteralPath $path -Encoding UTF8 -Value (
+            '{0} [{1}] {2}' -f ([DateTimeOffset]::Now.ToString('yyyy-MM-dd HH:mm:ss zzz')), $Level, $safe)
+    }
+    catch {
+        # Monitoring must never take down a healthy tunnel because a diagnostic
+        # log could not be rotated or written.
+    }
+}
+
+function Test-ManagedMonitorProcess($Process) {
+    if (-not $Process -or $Process.ProcessName -notin @('powershell', 'pwsh')) {
+        return $false
+    }
+
+    try {
+        $details = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.Id)" -ErrorAction Stop
+        if ($details) {
+            $scriptPath = [IO.Path]::GetFullPath($PSCommandPath)
+            $configPath = (Resolve-Path -LiteralPath $Config).Path
+            return $details.CommandLine -match [regex]::Escape($scriptPath) -and
+                $details.CommandLine -match '(?i)(?:^|\s)monitor(?:\s|$)' -and
+                $details.CommandLine -match [regex]::Escape($configPath)
+        }
+    }
+    catch {
+        # Fall back to the process name for restricted Windows sessions. The
+        # PID file lives in this profile's private runtime directory.
+    }
+
+    return $true
+}
+
+function Get-MonitorProcess {
+    $pidPath = Get-StatePath 'monitor.pid'
+    if (-not (Test-Path -LiteralPath $pidPath -PathType Leaf)) {
+        return $null
+    }
+
+    $savedPid = 0
+    if (-not [int]::TryParse((Get-Content -Raw -LiteralPath $pidPath).Trim(), [ref]$savedPid)) {
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+
+    $process = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+    if (-not (Test-ManagedMonitorProcess $process)) {
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    return $process
+}
+
+function Stop-Monitor {
+    $process = Get-MonitorProcess
+    $pidPath = Get-StatePath 'monitor.pid'
+    if (-not $process) {
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        Write-Warn 'Automatic tunnel repair is not running.'
+        return
+    }
+
+    Stop-Process -Id $process.Id -Force
+    Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+    Write-MonitorEvent "Automatic repair monitor stopped (PID $($process.Id))."
+    Write-Pass "Stopped automatic repair monitor PID $($process.Id)."
+}
+
+function Enter-RepairLock([int]$TimeoutSeconds = 15) {
+    $path = Get-StatePath 'repair.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            return [IO.File]::Open(
+                $path,
+                [IO.FileMode]::OpenOrCreate,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::None)
+        }
+        catch [IO.IOException] {
+            Start-Sleep -Milliseconds 250
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw 'Another tunnel repair operation is still running.'
+}
+
+function Repair-Tunnel($Configuration) {
+    $repairLock = Enter-RepairLock
+    try {
+        if (-not (Test-TcpPort ([string]$Configuration.proxy.host) ([int]$Configuration.proxy.port) 1500)) {
+            throw "The Windows proxy is not listening at $($Configuration.proxy.host):$($Configuration.proxy.port)."
+        }
+
+        $existing = Get-TunnelProcess $Configuration
+        if ($existing) {
+            if (Test-RemoteProxy $Configuration) {
+                Write-MonitorEvent "Tunnel health check passed (PID $($existing.Id))."
+                Write-Pass "The managed tunnel is healthy (PID $($existing.Id)); no rebuild was needed."
+                return $existing
+            }
+
+            Write-MonitorEvent (
+                "Tunnel process PID $($existing.Id) was alive but the remote proxy probe failed; rebuilding it.") 'WARN'
+            Stop-Tunnel $Configuration
+        }
+        else {
+            Write-MonitorEvent ("Tunnel was not running. Last SSH message: $(Get-TunnelFailureSummary)") 'WARN'
+        }
+
+        if (-not (Test-SshLogin $Configuration -Quiet)) {
+            throw 'SSH login is not ready; the tunnel cannot be rebuilt yet.'
+        }
+
+        $process = Start-Tunnel $Configuration
+        if (-not (Test-RemoteProxy $Configuration)) {
+            Stop-Tunnel $Configuration
+            throw 'The rebuilt SSH tunnel did not pass the remote proxy probe.'
+        }
+
+        Write-MonitorEvent "Tunnel repair succeeded with PID $($process.Id)."
+        Write-Pass "Tunnel repair succeeded (PID $($process.Id))."
+        return $process
+    }
+    catch {
+        Write-MonitorEvent $_.Exception.Message 'ERROR'
+        throw
+    }
+    finally {
+        $repairLock.Dispose()
+    }
+}
+
+function Start-Monitor($Configuration) {
+    $existing = Get-MonitorProcess
+    if ($existing) {
+        Write-Pass "Automatic tunnel repair is already running (PID $($existing.Id))."
+        return $existing
+    }
+
+    $powerShell = Get-Executable 'powershell.exe'
+    if (-not $powerShell) {
+        throw 'powershell.exe was not found; automatic tunnel repair cannot start.'
+    }
+
+    $scriptPath = [IO.Path]::GetFullPath($PSCommandPath)
+    $configPath = (Resolve-Path -LiteralPath $Config).Path
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $scriptPath,
+        'monitor', '-Config', $configPath
+    )
+    $argumentLine = ($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' '
+    $stdout = Get-StatePath 'monitor.stdout.log'
+    $stderr = Get-StatePath 'monitor.stderr.log'
+    $process = Start-Process -FilePath $powerShell -ArgumentList $argumentLine `
+        -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    Start-Sleep -Seconds 1
+    if ($process.HasExited) {
+        $detail = if (Test-Path -LiteralPath $stderr) { Get-Content -Raw -LiteralPath $stderr } else { '' }
+        throw "Automatic tunnel repair monitor exited immediately: $detail"
+    }
+
+    Write-Utf8NoBom (Get-StatePath 'monitor.pid') ([string]$process.Id)
+    Write-MonitorEvent "Automatic repair monitor started (PID $($process.Id))."
+    Write-Pass "Automatic tunnel repair started (PID $($process.Id))."
+    return $process
+}
+
+function Get-MonitorRetryDelay([int]$FailureCount) {
+    $delays = @(2, 5, 10, 30, 60, 300)
+    return $delays[[Math]::Min([Math]::Max($FailureCount - 1, 0), $delays.Count - 1)]
+}
+
+function Invoke-TunnelMonitor($Configuration) {
+    $other = Get-MonitorProcess
+    if ($other -and $other.Id -ne $PID) {
+        Write-Warn "Another automatic repair monitor is already running (PID $($other.Id))."
+        return
+    }
+
+    Write-Utf8NoBom (Get-StatePath 'monitor.pid') ([string]$PID)
+    Write-MonitorEvent "Automatic repair monitor entered its health loop (PID $PID)."
+    $failureCount = 0
+    $nextRemoteProbe = [DateTime]::MinValue
+    try {
+        while ($true) {
+            try {
+                $tunnel = Get-TunnelProcess $Configuration
+                if (-not $tunnel -or [DateTime]::UtcNow -ge $nextRemoteProbe) {
+                    $null = Repair-Tunnel $Configuration
+                    $nextRemoteProbe = [DateTime]::UtcNow.AddSeconds(60)
+                }
+                $failureCount = 0
+                Start-Sleep -Seconds 20
+            }
+            catch {
+                $failureCount++
+                $delay = Get-MonitorRetryDelay $failureCount
+                Write-MonitorEvent (
+                    "Repair attempt $failureCount failed; retrying in $delay seconds. $($_.Exception.Message)") 'WARN'
+                Start-Sleep -Seconds $delay
+            }
+        }
+    }
+    finally {
+        $pidPath = Get-StatePath 'monitor.pid'
+        if ((Test-Path -LiteralPath $pidPath) -and
+            (Get-Content -Raw -LiteralPath $pidPath).Trim() -eq [string]$PID) {
+            Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Start-Tunnel($Configuration) {
     $existing = Get-TunnelProcess $Configuration
     if ($existing) {
@@ -954,6 +1193,20 @@ function Invoke-Doctor($Configuration) {
         Write-Warn 'Managed SSH tunnel is not running. Use start to establish it.'
     }
 
+    $monitor = Get-MonitorProcess
+    if ($monitor) {
+        Write-Pass "Automatic tunnel repair is running (PID $($monitor.Id))."
+    }
+    else {
+        Write-Warn 'Automatic tunnel repair is not running. Use start or repair to enable it.'
+    }
+    $monitorLog = Get-StatePath 'monitor.events.log'
+    if (Test-Path -LiteralPath $monitorLog -PathType Leaf) {
+        Write-Host '       Recent repair events:'
+        Get-Content -LiteralPath $monitorLog -Tail 8 -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "       $_" }
+    }
+
     Write-Step 'Checking VS Code extensions'
     $extensionRoot = Join-Path $env:USERPROFILE '.vscode\extensions'
     $codex = Get-ChildItem -LiteralPath $extensionRoot -Directory -ErrorAction SilentlyContinue | Where-Object Name -Like "$($Configuration.vscode.extensionId)-*" | Select-Object -First 1
@@ -1022,19 +1275,33 @@ try {
             if (-not (Test-RemoteProxy $configuration)) {
                 throw 'The SSH tunnel is running, but remote proxy validation failed.'
             }
+            $null = Start-Monitor $configuration
             Install-RemoteProxyEnvironment $configuration
             Start-VsCode $configuration
             Write-Pass 'Codex remote proxy workflow started.'
         }
+        'repair' {
+            Start-ProxyIfNeeded $configuration
+            Install-SshConfig $configuration
+            $null = Repair-Tunnel $configuration
+            $null = Start-Monitor $configuration
+            Write-Pass 'Tunnel repair and automatic monitoring are ready.'
+        }
+        'monitor' {
+            Invoke-TunnelMonitor $configuration
+        }
         'status' {
             $proxyOk = Test-TcpPort ([string]$configuration.proxy.host) ([int]$configuration.proxy.port)
             $tunnel = Get-TunnelProcess $configuration
+            $monitor = Get-MonitorProcess
             Write-Host "Proxy:  $(if ($proxyOk) { 'running' } else { 'not ready' })"
             Write-Host "Tunnel: $(if ($tunnel) { "running (PID $($tunnel.Id))" } else { 'stopped' })"
+            Write-Host "Auto repair: $(if ($monitor) { "running (PID $($monitor.Id))" } else { 'stopped' })"
             $loginLabel = if (Test-PasswordGatewayMode $configuration) { 'SSH password gateway login' } else { 'SSH key login' }
             Write-Host "$loginLabel`: $(if (Test-SshLogin $configuration -Quiet) { 'ready' } else { 'not ready' })"
         }
         'stop' {
+            Stop-Monitor
             Stop-Tunnel $configuration
         }
         'uninstall' {
@@ -1042,6 +1309,7 @@ try {
                 $answer = Read-Host 'Remove managed SSH and remote proxy configuration? Type YES to continue'
                 if ($answer -ne 'YES') { Write-Warn 'Uninstall cancelled.'; return }
             }
+            Stop-Monitor
             Stop-Tunnel $configuration
             Remove-SshConfig $configuration
             if (Test-SshLogin $configuration -Quiet) {

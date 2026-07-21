@@ -144,10 +144,13 @@
                         </Grid>
                     </Border>
 
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <WrapPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
                         <Button x:Name="DiagnosticsButton" Content="运行诊断"
                                 Style="{StaticResource SecondaryButtonStyle}"
                                 Click="Diagnostics_Click" Margin="0,0,9,0" />
+                        <Button x:Name="RepairButton" Content="修复隧道"
+                                Style="{StaticResource SecondaryButtonStyle}"
+                                Click="Repair_Click" Margin="0,0,9,0" />
                         <Button x:Name="StatusButton" Content="刷新状态"
                                 Style="{StaticResource SecondaryButtonStyle}"
                                 Click="Status_Click" Margin="0,0,9,0" />
@@ -157,7 +160,7 @@
                         <Button x:Name="ConnectButton" Content="连接并打开 VS Code"
                                 Style="{StaticResource PrimaryButtonStyle}"
                                 Click="Connect_Click" />
-                    </StackPanel>
+                    </WrapPanel>
                 </Grid>
             </Border>
 

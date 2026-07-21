@@ -10,6 +10,7 @@ public static partial class WorkflowOutputParser
         ArgumentNullException.ThrowIfNull(output);
 
         return string.Equals(command, "start", StringComparison.OrdinalIgnoreCase)
+               || string.Equals(command, "repair", StringComparison.OrdinalIgnoreCase)
                || ProxyReadyLineRegex().IsMatch(output)
                || output.Contains(
                    "HTTP proxy probe succeeded",

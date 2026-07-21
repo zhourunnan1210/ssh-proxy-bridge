@@ -241,6 +241,14 @@ public partial class MainWindow : Window
         await RunWorkflowAsync("status", "正在刷新状态…", showFailureDialog: true);
     }
 
+    private async void Repair_Click(object sender, RoutedEventArgs e)
+    {
+        await RunWorkflowAsync(
+            "repair",
+            "正在检查并修复代理隧道；修复过程不会重复打开 VS Code…",
+            showFailureDialog: true);
+    }
+
     private async void Stop_Click(object sender, RoutedEventArgs e)
     {
         await RunWorkflowAsync("stop", "正在停止受管隧道…", showFailureDialog: true);
@@ -725,7 +733,7 @@ public partial class MainWindow : Window
         {
             SetState("尚未就绪", StateKind.Working);
             LogTextBox.Text =
-                "该 Profile 尚未完成 SSH 初始化。请先完成密码验证、公钥安装和 Key-only 登录验证。";
+                "该 Profile 尚未完成 SSH 初始化。请先完成密码验证和对应的 SSH 登录初始化。";
             return;
         }
 
@@ -853,6 +861,7 @@ public partial class MainWindow : Window
     private static TimeSpan GetWorkflowTimeout(string command) => command switch
     {
         "start" => TimeSpan.FromMinutes(3),
+        "repair" => TimeSpan.FromMinutes(2),
         "doctor" => TimeSpan.FromMinutes(2),
         "status" => TimeSpan.FromSeconds(45),
         "stop" => TimeSpan.FromSeconds(45),
@@ -873,12 +882,25 @@ public partial class MainWindow : Window
             ? Color.FromRgb(34, 197, 94)
             : Color.FromRgb(148, 163, 184));
 
+        var tunnelRunning = output.Contains("Tunnel: running", StringComparison.OrdinalIgnoreCase);
+        var autoRepairRunning = output.Contains("Auto repair: running", StringComparison.OrdinalIgnoreCase)
+                                || output.Contains("Automatic tunnel repair started", StringComparison.OrdinalIgnoreCase)
+                                || output.Contains("Automatic tunnel repair is already running", StringComparison.OrdinalIgnoreCase);
+
         if (command == "stop")
         {
             SetState("已停止", StateKind.Idle);
         }
-        else if (command == "start"
-                 || output.Contains("Tunnel: running", StringComparison.OrdinalIgnoreCase))
+        else if (command is "start" or "repair"
+                 || (tunnelRunning && autoRepairRunning))
+        {
+            SetState(autoRepairRunning ? "已连接 · 自动修复" : "已连接", StateKind.Connected);
+        }
+        else if (autoRepairRunning)
+        {
+            SetState("正在自动修复", StateKind.Working);
+        }
+        else if (tunnelRunning)
         {
             SetState("已连接", StateKind.Connected);
         }
@@ -915,6 +937,7 @@ public partial class MainWindow : Window
         ConnectButton.IsEnabled = enabled && (canInitialize || canRun);
         ConnectButton.Content = canInitialize ? "完成 SSH 初始化" : "连接并打开 VS Code";
         StatusButton.IsEnabled = enabled && canRun;
+        RepairButton.IsEnabled = enabled && canRun;
         StopButton.IsEnabled = enabled && canRun;
         DiagnosticsButton.IsEnabled = enabled && canRun;
         var canManageProfile = _selectedProfile is not null && !isLegacy;

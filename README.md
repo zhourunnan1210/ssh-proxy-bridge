@@ -26,6 +26,7 @@ SSH Proxy Bridge 会：
 - 通过 SSH 把本机代理安全地带到远程服务器。
 - 为服务器设置 Codex 等工具能够识别的代理环境。
 - 直接用 VS Code 打开你指定的远程项目目录。
+- 在网络波动或 SSH 被重置后自动检查并重建受管隧道。
 - 保存多个服务器，下次只需选择服务器并点击连接。
 
 ## 三步开始使用
@@ -103,7 +104,14 @@ SSH-Proxy-Bridge-v0.2.0-win-x64.zip
 <details>
 <summary><strong>VS Code 已打开，但 Codex 仍然无法联网</strong></summary>
 
-先在 SSH Proxy Bridge 中运行诊断，确认“本机代理”“SSH 隧道”和“服务器代理联网”均正常，然后重新连接 VS Code Remote-SSH 窗口。
+先点击“修复隧道”。软件会检查本机代理、SSH 进程和服务器代理端口，只重建失效的受管隧道，不会重复打开 VS Code。仍未恢复时再运行诊断。
+
+</details>
+
+<details>
+<summary><strong>隧道会因为网络波动突然中断吗？</strong></summary>
+
+可能。电脑网络切换、休眠、路由器或服务器重置 TCP 连接时，SSH 会退出。成功连接后，SSH Proxy Bridge 会启动独立的自动修复监控；即使关闭 GUI，它也会继续检查，条件恢复后按退避策略重建隧道。点击“停止连接”会同时停止监控和隧道。
 
 </details>
 
