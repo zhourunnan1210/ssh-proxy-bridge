@@ -4,8 +4,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if (-not $Config) {
-    $Config = Join-Path $PSScriptRoot 'config.local.json'
+    $Config = Join-Path $root 'config.local.json'
 }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

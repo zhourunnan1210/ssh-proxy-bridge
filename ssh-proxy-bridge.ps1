@@ -60,10 +60,20 @@ function Read-Configuration([string]$Path) {
         }
     }
 
-    foreach ($name in @('alias', 'host', 'port', 'user', 'identityFile', 'remoteProxyHost', 'remoteProxyPort')) {
+    foreach ($name in @('alias', 'host', 'port', 'user', 'remoteProxyHost', 'remoteProxyPort')) {
         if (-not $value.ssh.PSObject.Properties[$name]) {
             throw "Configuration value is missing: ssh.$name"
         }
+    }
+
+    $authentication = if ($value.ssh.PSObject.Properties['authentication']) {
+        [string]$value.ssh.authentication
+    }
+    else {
+        'managedKey'
+    }
+    if ($authentication -ine 'passwordGateway' -and -not $value.ssh.PSObject.Properties['identityFile']) {
+        throw 'Configuration value is missing: ssh.identityFile'
     }
 
     $serialized = $value | ConvertTo-Json -Depth 10
@@ -232,16 +242,97 @@ function Get-KeyPath($Configuration) {
     return Expand-EnvironmentPath ([string]$Configuration.ssh.identityFile)
 }
 
+function Get-AuthenticationMode($Configuration) {
+    $property = $Configuration.ssh.PSObject.Properties['authentication']
+    if (-not $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        return 'managedKey'
+    }
+    return [string]$property.Value
+}
+
+function Test-PasswordGatewayMode($Configuration) {
+    return (Get-AuthenticationMode $Configuration) -ieq 'passwordGateway'
+}
+
+function Get-SshProcessEnvironment($Configuration) {
+    if (-not (Test-PasswordGatewayMode $Configuration)) {
+        return $null
+    }
+
+    foreach ($name in @('credentialTarget', 'askPassExecutable')) {
+        if ((-not $Configuration.ssh.PSObject.Properties[$name]) -or
+            [string]::IsNullOrWhiteSpace([string]$Configuration.ssh.$name)) {
+            throw "Password gateway configuration is missing: ssh.$name"
+        }
+    }
+
+    $askPass = Expand-EnvironmentPath ([string]$Configuration.ssh.askPassExecutable)
+    if (-not (Test-Path -LiteralPath $askPass -PathType Leaf)) {
+        throw "SSH AskPass helper not found: $askPass"
+    }
+
+    return @{
+        SSH_ASKPASS = $askPass
+        SSH_ASKPASS_REQUIRE = 'force'
+        SSH_PROXY_BRIDGE_ASKPASS = '1'
+        SSH_PROXY_BRIDGE_CREDENTIAL_TARGET = [string]$Configuration.ssh.credentialTarget
+        DISPLAY = 'ssh-proxy-bridge:0'
+    }
+}
+
+function Invoke-WithProcessEnvironment($EnvironmentVariables, [scriptblock]$Action) {
+    if (-not $EnvironmentVariables) {
+        return & $Action
+    }
+
+    $previous = @{}
+    try {
+        foreach ($name in $EnvironmentVariables.Keys) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable([string]$name, 'Process')
+            [Environment]::SetEnvironmentVariable(
+                [string]$name,
+                [string]$EnvironmentVariables[$name],
+                'Process')
+        }
+        return & $Action
+    }
+    finally {
+        foreach ($name in $EnvironmentVariables.Keys) {
+            [Environment]::SetEnvironmentVariable(
+                [string]$name,
+                $previous[$name],
+                'Process')
+        }
+    }
+}
+
+function Get-SshTargetArguments($Configuration, [switch]$UseAlias) {
+    if ($UseAlias) {
+        return @([string]$Configuration.ssh.alias)
+    }
+    return @('-l', [string]$Configuration.ssh.user, [string]$Configuration.ssh.host)
+}
+
 function Get-SshBaseArguments($Configuration, [switch]$UseAlias) {
     $ssh = $Configuration.ssh
-    $identity = Get-KeyPath $Configuration
     $arguments = @(
         '-o', 'ConnectTimeout=10',
         '-o', 'ServerAliveInterval=30',
-        '-o', 'ServerAliveCountMax=3',
-        '-o', 'IdentitiesOnly=yes',
-        '-i', $identity
+        '-o', 'ServerAliveCountMax=3'
     )
+    if (Test-PasswordGatewayMode $Configuration) {
+        $arguments += @(
+            '-o', 'PreferredAuthentications=password',
+            '-o', 'PubkeyAuthentication=no'
+        )
+    }
+    else {
+        $identity = Get-KeyPath $Configuration
+        $arguments += @(
+            '-o', 'IdentitiesOnly=yes',
+            '-i', $identity
+        )
+    }
     $knownHostsProperty = $ssh.PSObject.Properties['userKnownHostsFile']
     if ($knownHostsProperty -and -not [string]::IsNullOrWhiteSpace([string]$knownHostsProperty.Value)) {
         $knownHostsPath = Expand-EnvironmentPath ([string]$knownHostsProperty.Value)
@@ -295,7 +386,8 @@ function Invoke-NativeProcessWithTimeout(
     [string]$FilePath,
     [string[]]$Arguments,
     [AllowNull()][string]$InputText,
-    [int]$TimeoutSeconds
+    [int]$TimeoutSeconds,
+    $EnvironmentVariables = $null
 ) {
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $FilePath
@@ -307,11 +399,13 @@ function Invoke-NativeProcessWithTimeout(
     $startInfo.RedirectStandardError = $true
     $startInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
     $startInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
-
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     try {
-        if (-not $process.Start()) {
+        $started = Invoke-WithProcessEnvironment $EnvironmentVariables {
+            $process.Start()
+        }
+        if (-not $started) {
             throw "Could not start native process: $FilePath"
         }
 
@@ -353,38 +447,50 @@ function Invoke-NativeProcessWithTimeout(
 
 function Get-SshOneShotArguments($Configuration, [switch]$UseAlias) {
     $arguments = @(Get-SshBaseArguments $Configuration -UseAlias:$UseAlias)
-    $arguments += @(
-        '-o', 'ConnectionAttempts=1',
-        '-o', 'BatchMode=yes',
-        '-o', 'NumberOfPasswordPrompts=0',
-        '-o', 'ClearAllForwardings=yes',
-        '-T'
-    )
+    $arguments += @('-o', 'ConnectionAttempts=1')
+    if (Test-PasswordGatewayMode $Configuration) {
+        $arguments += @(
+            '-o', 'BatchMode=no',
+            '-o', 'NumberOfPasswordPrompts=1'
+        )
+    }
+    else {
+        $arguments += @(
+            '-o', 'BatchMode=yes',
+            '-o', 'NumberOfPasswordPrompts=0'
+        )
+    }
+    $arguments += @('-o', 'ClearAllForwardings=yes', '-T')
     return $arguments
 }
 
-function Test-KeyLogin($Configuration, [switch]$Quiet) {
+function Test-SshLogin($Configuration, [switch]$Quiet) {
     $sshExe = Get-Executable 'ssh.exe'
-    $keyPath = Get-KeyPath $Configuration
-    if (-not $sshExe -or -not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
+    if (-not $sshExe) {
         return $false
     }
+    if (-not (Test-PasswordGatewayMode $Configuration)) {
+        $keyPath = Get-KeyPath $Configuration
+        if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
+            return $false
+        }
+    }
     $arguments = @(Get-SshOneShotArguments $Configuration)
-    $arguments += @(
-        "$($Configuration.ssh.user)@$($Configuration.ssh.host)",
-        'printf CODEX_REMOTE_KEY_OK'
-    )
-    $result = Invoke-NativeProcessWithTimeout $sshExe $arguments $null 20
-    $ok = ($result.ExitCode -eq 0 -and ($result.Output -join '') -eq 'CODEX_REMOTE_KEY_OK')
+    $arguments += @(Get-SshTargetArguments $Configuration)
+    $arguments += 'printf SSH_PROXY_BRIDGE_LOGIN_OK'
+    $environment = Get-SshProcessEnvironment $Configuration
+    $result = Invoke-NativeProcessWithTimeout $sshExe $arguments $null 20 $environment
+    $ok = ($result.ExitCode -eq 0 -and ($result.Output -join '') -eq 'SSH_PROXY_BRIDGE_LOGIN_OK')
+    $label = if (Test-PasswordGatewayMode $Configuration) { 'SSH password gateway login' } else { 'SSH key login' }
     if (-not $Quiet) {
         if ($ok) {
-            Write-Pass 'SSH key login succeeded.'
+            Write-Pass "$label succeeded."
         }
         elseif ($result.TimedOut) {
-            Write-Fail 'SSH key login timed out after 20 seconds. The server did not finish the SSH handshake.'
+            Write-Fail "$label timed out after 20 seconds. The server did not finish the SSH handshake."
         }
         else {
-            Write-Fail 'SSH key login is not ready.'
+            Write-Fail "$label is not ready."
         }
     }
     return $ok
@@ -445,7 +551,7 @@ function Install-PublicKeyInteractively($Configuration) {
     if ($installExitCode -ne 0) {
         throw 'Public key installation failed.'
     }
-    if (-not (Test-KeyLogin $Configuration)) {
+    if (-not (Test-SshLogin $Configuration)) {
         throw 'The public key was copied, but key-only login validation failed.'
     }
 }
@@ -479,7 +585,19 @@ function Install-SshConfig($Configuration) {
     $alias = [string]$Configuration.ssh.alias
     $start = "# >>> codex-remote-proxy:$alias >>>"
     $end = "# <<< codex-remote-proxy:$alias <<<"
-    $identity = (Get-KeyPath $Configuration).Replace('\', '/')
+    $authenticationDirectives = if (Test-PasswordGatewayMode $Configuration) {
+@"
+    PreferredAuthentications password
+    PubkeyAuthentication no
+"@
+    }
+    else {
+        $identity = (Get-KeyPath $Configuration).Replace('\', '/')
+@"
+    IdentityFile "$identity"
+    IdentitiesOnly yes
+"@
+    }
     $knownHostsDirectives = ''
     $knownHostsProperty = $Configuration.ssh.PSObject.Properties['userKnownHostsFile']
     if ($knownHostsProperty -and -not [string]::IsNullOrWhiteSpace([string]$knownHostsProperty.Value)) {
@@ -495,8 +613,7 @@ Host $alias
     HostName $($Configuration.ssh.host)
     User $($Configuration.ssh.user)
     Port $($Configuration.ssh.port)
-    IdentityFile "$identity"
-    IdentitiesOnly yes
+$authenticationDirectives
 $knownHostsDirectives
     ServerAliveInterval 30
     ServerAliveCountMax 3
@@ -510,22 +627,24 @@ $end
 function Invoke-Ssh($Configuration, [string]$RemoteCommand, [switch]$UseAlias) {
     $sshExe = Get-Executable 'ssh.exe'
     $arguments = @(Get-SshOneShotArguments $Configuration -UseAlias:$UseAlias)
-    $target = if ($UseAlias) { [string]$Configuration.ssh.alias } else { "$($Configuration.ssh.user)@$($Configuration.ssh.host)" }
-    $arguments += @($target, $RemoteCommand)
-    return Invoke-NativeProcessWithTimeout $sshExe $arguments $null 35
+    $arguments += @(Get-SshTargetArguments $Configuration -UseAlias:$UseAlias)
+    $arguments += $RemoteCommand
+    $environment = Get-SshProcessEnvironment $Configuration
+    return Invoke-NativeProcessWithTimeout $sshExe $arguments $null 35 $environment
 }
 
 function Invoke-SshWithInput($Configuration, [string]$RemoteCommand, [string]$InputText, [switch]$UseAlias) {
     $sshExe = Get-Executable 'ssh.exe'
     $arguments = @(Get-SshOneShotArguments $Configuration -UseAlias:$UseAlias)
-    $target = if ($UseAlias) { [string]$Configuration.ssh.alias } else { "$($Configuration.ssh.user)@$($Configuration.ssh.host)" }
-    $arguments += @($target, $RemoteCommand)
-    return Invoke-NativeProcessWithTimeout $sshExe $arguments $InputText 35
+    $arguments += @(Get-SshTargetArguments $Configuration -UseAlias:$UseAlias)
+    $arguments += $RemoteCommand
+    $environment = Get-SshProcessEnvironment $Configuration
+    return Invoke-NativeProcessWithTimeout $sshExe $arguments $InputText 35 $environment
 }
 
 function Install-RemoteProxyEnvironment($Configuration) {
-    if (-not (Test-KeyLogin $Configuration -Quiet)) {
-        throw 'SSH key login is required before remote setup.'
+    if (-not (Test-SshLogin $Configuration -Quiet)) {
+        throw 'SSH login is required before remote setup.'
     }
     $hostName = [string]$Configuration.ssh.remoteProxyHost
     $port = [int]$Configuration.ssh.remoteProxyPort
@@ -646,15 +765,20 @@ function Start-Tunnel($Configuration) {
         return $existing
     }
 
-    if (-not (Test-KeyLogin $Configuration -Quiet)) {
-        throw 'SSH key login is not ready. Run bootstrap-key first.'
+    if (-not (Test-SshLogin $Configuration -Quiet)) {
+        throw 'SSH login is not ready. Complete SSH initialization first.'
     }
     $sshExe = Get-Executable 'ssh.exe'
     $remoteSpec = "$($Configuration.ssh.remoteProxyHost):$($Configuration.ssh.remoteProxyPort):$($Configuration.proxy.host):$($Configuration.proxy.port)"
     $arguments = Get-SshBaseArguments $Configuration -UseAlias
+    $arguments += @('-N', '-T')
+    if (Test-PasswordGatewayMode $Configuration) {
+        $arguments += @('-o', 'BatchMode=no', '-o', 'NumberOfPasswordPrompts=1')
+    }
+    else {
+        $arguments += @('-o', 'BatchMode=yes', '-o', 'NumberOfPasswordPrompts=0')
+    }
     $arguments += @(
-        '-N', '-T',
-        '-o', 'BatchMode=yes',
         '-o', 'ExitOnForwardFailure=yes',
         '-R', $remoteSpec,
         [string]$Configuration.ssh.alias
@@ -662,7 +786,10 @@ function Start-Tunnel($Configuration) {
     $state = Get-StateDirectory
     $stdout = Join-Path $state 'tunnel.stdout.log'
     $stderr = Join-Path $state 'tunnel.stderr.log'
-    $process = Start-Process -FilePath $sshExe -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $environment = Get-SshProcessEnvironment $Configuration
+    $process = Invoke-WithProcessEnvironment $environment {
+        Start-Process -FilePath $sshExe -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    }
     Start-Sleep -Seconds 2
     if ($process.HasExited) {
         $detail = if (Test-Path -LiteralPath $stderr) { Get-Content -Raw -LiteralPath $stderr } else { 'no error output' }
@@ -731,15 +858,22 @@ function Start-VsCode($Configuration) {
     $launchId = '{0}.{1}' -f ([DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff')), $PID
     $stdout = Join-Path $state "vscode.$launchId.stdout.log"
     $stderr = Join-Path $state "vscode.$launchId.stderr.log"
-    Start-Process -FilePath $code -ArgumentList $arguments -WindowStyle Hidden `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
+    $environment = Get-SshProcessEnvironment $Configuration
+    Invoke-WithProcessEnvironment $environment {
+        Start-Process -FilePath $code -ArgumentList $arguments -WindowStyle Hidden `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
+    }
     Write-Pass 'VS Code Remote-SSH launch requested.'
 }
 
 function Invoke-Doctor($Configuration) {
     $failures = 0
     Write-Step 'Checking local commands'
-    foreach ($name in @('ssh.exe', 'ssh-keygen.exe', 'code.cmd', 'curl.exe')) {
+    $commands = @('ssh.exe', 'code.cmd', 'curl.exe')
+    if (-not (Test-PasswordGatewayMode $Configuration)) {
+        $commands += 'ssh-keygen.exe'
+    }
+    foreach ($name in $commands) {
         $path = Get-Executable $name
         if ($path) { Write-Pass "$name -> $path" } else { Write-Fail "$name was not found."; $failures++ }
     }
@@ -793,13 +927,19 @@ function Invoke-Doctor($Configuration) {
         Write-Fail "SSH endpoint is not reachable at $($Configuration.ssh.host):$($Configuration.ssh.port)."
         $failures++
     }
-    $keyPath = Get-KeyPath $Configuration
-    if (Test-Path -LiteralPath $keyPath -PathType Leaf) {
-        Write-Pass "SSH private key exists: $keyPath"
-        if (-not (Test-KeyLogin $Configuration)) { $failures++ }
+    if (Test-PasswordGatewayMode $Configuration) {
+        Write-Pass 'SSH authentication mode: password gateway with Windows Credential Manager.'
+        if (-not (Test-SshLogin $Configuration)) { $failures++ }
     }
     else {
-        Write-Warn "SSH key has not been created yet: $keyPath"
+        $keyPath = Get-KeyPath $Configuration
+        if (Test-Path -LiteralPath $keyPath -PathType Leaf) {
+            Write-Pass "SSH private key exists: $keyPath"
+            if (-not (Test-SshLogin $Configuration)) { $failures++ }
+        }
+        else {
+            Write-Warn "SSH key has not been created yet: $keyPath"
+        }
     }
 
     Write-Step 'Checking managed reverse tunnel'
@@ -866,8 +1006,8 @@ try {
         }
         'setup' {
             Install-SshConfig $configuration
-            if (-not (Test-KeyLogin $configuration)) {
-                throw 'Run bootstrap-key first from an interactive PowerShell terminal.'
+            if (-not (Test-SshLogin $configuration)) {
+                throw 'Complete SSH initialization in SSH Proxy Bridge first.'
             }
             Install-RemoteProxyEnvironment $configuration
             Write-Pass 'Setup is complete.'
@@ -875,8 +1015,8 @@ try {
         'start' {
             Start-ProxyIfNeeded $configuration
             Install-SshConfig $configuration
-            if (-not (Test-KeyLogin $configuration)) {
-                throw 'Run bootstrap-key first from an interactive PowerShell terminal.'
+            if (-not (Test-SshLogin $configuration)) {
+                throw 'Complete SSH initialization in SSH Proxy Bridge first.'
             }
             $null = Start-Tunnel $configuration
             if (-not (Test-RemoteProxy $configuration)) {
@@ -891,7 +1031,8 @@ try {
             $tunnel = Get-TunnelProcess $configuration
             Write-Host "Proxy:  $(if ($proxyOk) { 'running' } else { 'not ready' })"
             Write-Host "Tunnel: $(if ($tunnel) { "running (PID $($tunnel.Id))" } else { 'stopped' })"
-            Write-Host "SSH key login: $(if (Test-KeyLogin $configuration -Quiet) { 'ready' } else { 'not ready' })"
+            $loginLabel = if (Test-PasswordGatewayMode $configuration) { 'SSH password gateway login' } else { 'SSH key login' }
+            Write-Host "$loginLabel`: $(if (Test-SshLogin $configuration -Quiet) { 'ready' } else { 'not ready' })"
         }
         'stop' {
             Stop-Tunnel $configuration
@@ -903,7 +1044,7 @@ try {
             }
             Stop-Tunnel $configuration
             Remove-SshConfig $configuration
-            if (Test-KeyLogin $configuration -Quiet) {
+            if (Test-SshLogin $configuration -Quiet) {
                 $start = '# >>> codex-remote-proxy >>>'
                 $end = '# <<< codex-remote-proxy <<<'
                 $script = @"
@@ -925,7 +1066,12 @@ mv "`$tmp" "`$file"
                 if ($result.ExitCode -eq 0) { Write-Pass 'Removed remote proxy environment block.' }
                 else { Write-Warn 'Could not remove the remote proxy environment block.' }
             }
-            Write-Pass 'Uninstall completed. The SSH private key was preserved.'
+            if (Test-PasswordGatewayMode $configuration) {
+                Write-Pass 'Uninstall completed. The saved Windows credential was preserved.'
+            }
+            else {
+                Write-Pass 'Uninstall completed. The SSH private key was preserved.'
+            }
         }
     }
 }

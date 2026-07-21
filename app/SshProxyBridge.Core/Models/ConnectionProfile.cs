@@ -109,7 +109,8 @@ public enum ProxyProtocol
 public enum AuthenticationMode
 {
     ManagedKey,
-    ExistingKey
+    ExistingKey,
+    PasswordGateway
 }
 
 public enum KeyProtectionMode

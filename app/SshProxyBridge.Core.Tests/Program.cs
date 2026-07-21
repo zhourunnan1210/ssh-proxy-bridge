@@ -10,6 +10,7 @@ var tests = new List<(string Name, Func<Task> Run)>
     ("Profile validation rejects invalid fields", TestInvalidProfile),
     ("Profile store round-trips without secrets", TestProfileStoreRoundTrip),
     ("Credential target is stable and profile-scoped", TestCredentialTarget),
+    ("Password gateway capabilities are classified without guessing", TestAuthenticationCapabilities),
     ("Legacy application data migration is additive and idempotent", TestLegacyDataMigration),
     ("SSH SHA256 fingerprint normalization is strict and stable", TestFingerprintNormalization),
     ("Proxy status parsing accepts variable spacing without accepting not-ready", TestProxyStatusParsing),
@@ -17,6 +18,7 @@ var tests = new List<(string Name, Func<Task> Run)>
     ("Remote port marker parsing is strict", TestRemotePortMarker),
     ("One-click ED25519 key generation is idempotent", TestSshKeyGeneration),
     ("Runtime config and known_hosts contain no password", TestRuntimeArtifacts),
+    ("Password gateway runtime contains only a credential reference", TestPasswordGatewayRuntimeArtifacts),
     ("Profile cleanup removes only owned local artifacts", TestProfileCleanup),
     ("Profile cleanup preserves an unowned private key", TestProfileCleanupPreservesUnownedKey),
     ("Profile cleanup preserves malformed SSH config", TestProfileCleanupPreservesMalformedConfig),
@@ -105,6 +107,30 @@ static Task TestCredentialTarget()
     Assert(
         legacyReference.TargetName == "CodexRemoteBridge:ssh-password:11111111-2222-3333-4444-555555555555",
         "Unexpected legacy credential target.");
+    Assert(CredentialReference.TryParseSshPassword(reference.TargetName, out var parsed)
+           && parsed == reference,
+        "Current SSH password target was not parsed.");
+    Assert(!CredentialReference.TryParseSshPassword("unrelated:credential", out _),
+        "An unrelated credential target was accepted by AskPass.");
+    return Task.CompletedTask;
+}
+
+static Task TestAuthenticationCapabilities()
+{
+    var passwordOnly = new SshAuthenticationCapabilities(["password"]);
+    Assert(passwordOnly.RequiresPasswordGateway,
+        "A password-only gateway was not recognized.");
+    Assert(!passwordOnly.SupportsPublicKey,
+        "A password-only gateway was classified as public-key capable.");
+
+    var standard = new SshAuthenticationCapabilities(["publickey", "password"]);
+    Assert(standard.SupportsPublicKey && !standard.RequiresPasswordGateway,
+        "A standard SSH server was incorrectly forced into password gateway mode.");
+    var fallback = new SshAuthenticationCapabilities(
+        [],
+        "No suitable authentication method found to complete authentication (password).");
+    Assert(fallback.RequiresPasswordGateway,
+        "SSH.NET's authentication error fallback was not classified.");
     return Task.CompletedTask;
 }
 
@@ -249,6 +275,44 @@ static async Task TestRuntimeArtifacts()
             "Runtime config does not reference managed known_hosts.");
         Assert(knownHosts.Contains("[203.0.113.10]:14240 ssh-ed25519", StringComparison.Ordinal),
             "known_hosts does not use the correct non-default port token.");
+    }
+    finally
+    {
+        if (Directory.Exists(directory))
+            Directory.Delete(directory, recursive: true);
+    }
+}
+
+static async Task TestPasswordGatewayRuntimeArtifacts()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"SshProxyBridge.GatewayRuntimeTests.{Guid.NewGuid():N}");
+
+    try
+    {
+        var profile = CreateValidProfile();
+        profile.Ssh.Authentication = AuthenticationMode.PasswordGateway;
+        profile.Ssh.IdentityFile = string.Empty;
+        profile.Ssh.CredentialRef = CredentialReference.SshPassword(profile.Id).TargetName;
+        profile.Ssh.HasStoredCredential = true;
+        profile.Ssh.HostKeySha256 = "SHA256:test-fingerprint";
+        profile.Ssh.HostKeyAlgorithm = "ssh-ed25519";
+        profile.Ssh.HostKeyBase64 = "AAAAC3NzaC1lZDI1NTE5AAAAITestKeyMaterial";
+        var askPassPath = Path.Combine(directory, "SshProxyBridge.exe");
+
+        var writer = new ProfileRuntimeWriter(directory, askPassPath);
+        var artifacts = await writer.WriteAsync(profile);
+        var runtimeJson = await File.ReadAllTextAsync(artifacts.RuntimeConfigPath);
+
+        Assert(runtimeJson.Contains("\"authentication\": \"passwordGateway\"", StringComparison.Ordinal),
+            "Password gateway mode was not written to runtime config.");
+        Assert(runtimeJson.Contains(profile.Ssh.CredentialRef, StringComparison.Ordinal),
+            "Runtime config does not contain the credential reference.");
+        Assert(runtimeJson.Contains(askPassPath.Replace("\\", "\\\\"), StringComparison.Ordinal),
+            "Runtime config does not contain the AskPass helper path.");
+        Assert(!runtimeJson.Contains("temporary-secret", StringComparison.Ordinal),
+            "Runtime config contains a password value.");
+        Assert(ProfileValidator.Validate(profile).Count == 0,
+            "A valid password gateway profile was rejected.");
     }
     finally
     {

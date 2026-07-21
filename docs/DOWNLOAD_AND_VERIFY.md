@@ -9,7 +9,7 @@
 3. 下载名称类似下面的 Windows 发行包：
 
    ```text
-   SSH-Proxy-Bridge-v0.1.0-win-x64.zip
+   SSH-Proxy-Bridge-v0.2.0-win-x64.zip
    ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)` 或 `Source code (tar.gz)`。它们只包含源码，不能作为便携版直接运行。
@@ -19,7 +19,7 @@
 右键 ZIP 并选择“全部解压”，或者在 PowerShell 中执行：
 
 ```powershell
-Expand-Archive .\SSH-Proxy-Bridge-v0.1.0-win-x64.zip -DestinationPath .\SSH-Proxy-Bridge-v0.1.0
+Expand-Archive .\SSH-Proxy-Bridge-v0.2.0-win-x64.zip -DestinationPath .\SSH-Proxy-Bridge-v0.2.0
 ```
 
 不要在压缩包预览窗口中直接运行 EXE，也不要只复制 `SshProxyBridge.exe`。EXE、PowerShell 运行引擎、用户手册和其他随包文件需要保留在同一目录。
@@ -29,8 +29,8 @@ Expand-Archive .\SSH-Proxy-Bridge-v0.1.0-win-x64.zip -DestinationPath .\SSH-Prox
 每个 Release 都会同时提供 ZIP 和对应的 `.sha256` 文件。下载后，在 ZIP 所在目录打开 PowerShell：
 
 ```powershell
-Get-FileHash .\SSH-Proxy-Bridge-v0.1.0-win-x64.zip -Algorithm SHA256
-Get-Content .\SSH-Proxy-Bridge-v0.1.0-win-x64.zip.sha256
+Get-FileHash .\SSH-Proxy-Bridge-v0.2.0-win-x64.zip -Algorithm SHA256
+Get-Content .\SSH-Proxy-Bridge-v0.2.0-win-x64.zip.sha256
 ```
 
 两处显示的 SHA-256 应完全一致。如果不一致，请删除文件并重新从本项目 Releases 页面下载。
