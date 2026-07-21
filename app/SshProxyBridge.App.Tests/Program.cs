@@ -47,6 +47,7 @@ internal static class Program
             var productButton = Require<Button>(window, "ProductNavButton");
             var serversButton = Require<Button>(window, "ServersNavButton");
             var addServerButton = Require<Button>(window, "AddServerButton");
+            var repairButton = Require<Button>(window, "RepairButton");
             var productPage = Require<Grid>(window, "ProductPage");
             var serverPage = Require<Grid>(window, "ServerPage");
             var viewer = Require<FlowDocumentScrollViewer>(window, "ProductDocumentViewer");
@@ -66,6 +67,18 @@ internal static class Program
                 throw new InvalidOperationException("Startup status output overwrote the ready proxy indicator.");
             }
             Console.WriteLine("PASS  Double-spaced startup status keeps the local proxy indicator green.");
+
+            var statusText = Require<TextBlock>(window, "StatusText");
+            updateState.Invoke(
+                window,
+                ["repair", 0, "Automatic tunnel repair started (PID 123)."]);
+            if (statusText.Text != "已连接 · 自动修复"
+                || repairButton.Parent is not WrapPanel)
+            {
+                throw new InvalidOperationException(
+                    "The repair workflow is missing from the current-server action row.");
+            }
+            Console.WriteLine("PASS  Manual repair reports automatic monitoring in the main action row.");
 
             var embeddedTypes = new[]
             {

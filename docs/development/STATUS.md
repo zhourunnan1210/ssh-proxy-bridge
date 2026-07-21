@@ -31,6 +31,8 @@
 - GUI 启动脚本改为启动前增量构建，并阻止重复启动旧版进程。
 - VS Code 启动时将标准输出和错误重定向到 Profile 状态目录，避免电脑重启后的首个 VS Code 进程继承 GUI 输出管道；GUI 侧另设三秒输出收尾上限，后台命令结束后不会无限停留在“处理中”。
 - 一次性 SSH 检查显式启用 `ClearAllForwardings=yes`，不继承用户 SSH Config 中无关的端口转发；原生 SSH 子进程设置 20–35 秒硬超时，GUI 工作流另设 45 秒至 3 分钟的整体兜底上限。
+- 新增手动 `repair` 工作流和独立后台 `monitor`：监控受管 PID、定期执行服务器代理探针，异常时使用进程归属校验、互斥修复锁和退避重试安全重建隧道；GUI 关闭后仍继续运行，`stop` 会同时停止监控与隧道。
+- GUI 当前服务器操作行新增“修复隧道”，修复成功后显示“已连接 · 自动修复”，不会重复打开 VS Code。
 - 已提供 Windows x64 自包含单文件发布配置和 `scripts/build/publish-portable.ps1`：复制运行脚本/手册、排除个人 `config.local.json` 与 PDB、生成 EXE/ZIP SHA256，并在发布目录及 ZIP 独立解压目录执行无界面包自检。
 
 ## 安全与兼容性结论
@@ -51,6 +53,7 @@ PowerShell parser: passed
 Real SSH status:   passed for key and password-gateway profiles; password-gateway remote proxy returned HTTP 204
 Embedded UI:       passed (all surfaces, 63 guide blocks, proxy status, AskPass mode, bounded process-output drain)
 Portable package:  passed (self-contained win-x64, clean ZIP extraction and package self-check)
+Self-heal integration: passed (isolated remote port; killed test tunnel was rebuilt with a new PID, live tunnel unchanged)
 ```
 
 测试覆盖：
