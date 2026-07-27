@@ -39,7 +39,7 @@ SSH Proxy Bridge 会：
 打开 [Releases](https://github.com/zhourunnan1210/ssh-proxy-bridge/releases/latest)，下载名称类似下面的文件：
 
 ```text
-SSH-Proxy-Bridge-v0.2.0-win-x64.zip
+SSH-Proxy-Bridge-v0.2.2-win-x64.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code`。下载完成后右键选择“全部解压”，不要直接在压缩包预览窗口里运行程序。

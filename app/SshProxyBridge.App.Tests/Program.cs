@@ -71,7 +71,11 @@ internal static class Program
             var statusText = Require<TextBlock>(window, "StatusText");
             updateState.Invoke(
                 window,
-                ["repair", 0, "Automatic tunnel repair started (PID 123)."]);
+                [
+                    "repair",
+                    0,
+                    "Automatic tunnel repair started (PID 123).\nApplication network: proxy"
+                ]);
             if (statusText.Text != "已连接 · 自动修复"
                 || repairButton.Parent is not WrapPanel)
             {
@@ -93,6 +97,20 @@ internal static class Program
                     "A missing remote application proxy was incorrectly shown as connected.");
             }
             Console.WriteLine("PASS  Missing remote application network overrides the green tunnel state.");
+
+            updateState.Invoke(
+                window,
+                [
+                    "start",
+                    0,
+                    "Remote ~/.bashrc application network route installed: direct.\nCodex authentication: ready"
+                ]);
+            if (statusText.Text != "需要处理")
+            {
+                throw new InvalidOperationException(
+                    "Route selection text was incorrectly treated as application network validation.");
+            }
+            Console.WriteLine("PASS  Route selection alone cannot produce a green connected state.");
 
             updateState.Invoke(
                 window,

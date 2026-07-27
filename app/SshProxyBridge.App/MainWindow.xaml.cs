@@ -893,14 +893,13 @@ public partial class MainWindow : Window
                                                 "Application proxy: not ready",
                                                 StringComparison.OrdinalIgnoreCase);
         var applicationNetworkDirect = output.Contains(
-                                            "Application network: direct",
-                                            StringComparison.OrdinalIgnoreCase)
-                                       || output.Contains(
-                                            "route: direct",
-                                            StringComparison.OrdinalIgnoreCase)
-                                       || output.Contains(
-                                            "route installed: direct",
-                                            StringComparison.OrdinalIgnoreCase);
+            "Application network: direct",
+            StringComparison.OrdinalIgnoreCase);
+        var applicationNetworkProxy = output.Contains(
+            "Application network: proxy",
+            StringComparison.OrdinalIgnoreCase);
+        var applicationNetworkReady = applicationNetworkDirect || applicationNetworkProxy;
+        var requiresApplicationNetwork = command is "start" or "repair" or "status";
         var codexSignInRequired = output.Contains(
             "Codex authentication: sign-in required",
             StringComparison.OrdinalIgnoreCase);
@@ -914,6 +913,10 @@ public partial class MainWindow : Window
             SetState("需要登录 Codex", StateKind.Error);
         }
         else if (applicationNetworkNotReady)
+        {
+            SetState("需要处理", StateKind.Error);
+        }
+        else if (requiresApplicationNetwork && !applicationNetworkReady)
         {
             SetState("需要处理", StateKind.Error);
         }

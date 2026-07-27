@@ -1082,7 +1082,7 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' \
     -X POST -H 'content-type: application/json' --data '{}' \
     "$target" 2>/dev/null || true)
 case "$code" in
-    2??|3??|4??)
+    400|401)
         printf 'CODEX_DIRECT_OK:%s\n' "$code"
         exit 0
         ;;
@@ -1127,14 +1127,12 @@ codex_code=$(curl -sS -o /dev/null -w '%{http_code}' \
     --connect-timeout 8 --max-time 15 --proxy "$proxy" \
     -X POST -H 'content-type: application/json' --data '{}' \
     'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
-if [ "$codex_code" != '407' ]; then
-    case "$codex_code" in
-        2??|3??|4??)
-            printf 'CODEX_REMOTE_PROXY_OK:codex:%s\n' "$codex_code"
-            exit 0
-            ;;
-    esac
-fi
+case "$codex_code" in
+    400|401)
+        printf 'CODEX_REMOTE_PROXY_OK:codex:%s\n' "$codex_code"
+        exit 0
+        ;;
+esac
 probe() {
     name="$1"
     target="$2"
@@ -1189,7 +1187,7 @@ case "$route" in
             -X POST -H 'content-type: application/json' --data '{}' \
             'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
         case "$direct_code" in
-            2??|3??|4??) ;;
+            400|401) ;;
             *)
                 printf 'APPLICATION_NETWORK_DIRECT_FAILED:%s\n' "${direct_code:-none}"
                 exit 1
@@ -1592,6 +1590,8 @@ try {
                 Write-Pass 'Windows proxy tunnel fallback selected.'
             }
             Start-VsCode $configuration
+            $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
+            Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
             $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
             Write-Pass "Codex remote network workflow started (route: $selectedRoute)."
@@ -1613,6 +1613,8 @@ try {
                 Install-RemoteProxyEnvironment $configuration 'proxy'
                 Write-Pass 'Tunnel repair and automatic monitoring are ready.'
             }
+            $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
+            Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
             $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
             Write-Pass "Application network route repaired (route: $selectedRoute)."
