@@ -17,16 +17,18 @@ ssh-proxy-bridge.ps1 和 USER_GUIDE.md 在同一个文件夹中，不要只复�
 
 首次使用
 --------
-1. 启动 Windows 代理软件。
-2. 双击 SshProxyBridge.exe。
-3. 点击“添加服务器”，在 GUI 中完成服务器录入和 SSH 初始化。
-4. 点击“连接并打开 VS Code”。
+1. 双击 SshProxyBridge.exe。
+2. 点击“添加服务器”，在 GUI 中完成服务器录入和 SSH 初始化。
+3. 点击“连接并打开 VS Code”。
+4. 程序会先尝试服务器直连 Codex，失败时才启动或使用 Windows 代理。
 
 自动修复
 --------
-连接成功后，程序会启动独立的后台监控。GUI 关闭后它仍会检查受管 SSH 隧道，
+选择代理回退并连接成功后，程序会启动独立的后台监控。GUI 关闭后它仍会检查受管 SSH 隧道，
 并在网络、本机代理和 SSH 恢复可用后自动重建。点击“停止连接”会同时停止监控；
 需要立即检查时可点击 GUI 中的“修复隧道”，该操作不会重复打开 VS Code。
+如果状态显示 Application network: not ready，请运行诊断。新版会检查服务器
+~/.bashrc 语法和活动 VS Code/Codex 进程是否真正继承了所选直连或代理环境。
 
 配置与密码
 ----------

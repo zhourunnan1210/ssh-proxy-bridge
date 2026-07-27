@@ -80,6 +80,48 @@ internal static class Program
             }
             Console.WriteLine("PASS  Manual repair reports automatic monitoring in the main action row.");
 
+            updateState.Invoke(
+                window,
+                [
+                    "status",
+                    0,
+                    "Proxy: running\nTunnel: running\nAuto repair: running\nApplication network: not ready"
+                ]);
+            if (statusText.Text != "需要处理")
+            {
+                throw new InvalidOperationException(
+                    "A missing remote application proxy was incorrectly shown as connected.");
+            }
+            Console.WriteLine("PASS  Missing remote application network overrides the green tunnel state.");
+
+            updateState.Invoke(
+                window,
+                [
+                    "status",
+                    0,
+                    "Proxy: not ready\nTunnel: stopped\nAuto repair: stopped\nApplication network: direct"
+                ]);
+            if (statusText.Text != "已连接 · 服务器直连")
+            {
+                throw new InvalidOperationException(
+                    "A healthy server-direct route was not shown as connected.");
+            }
+            Console.WriteLine("PASS  Server-direct mode does not require a local proxy or tunnel.");
+
+            updateState.Invoke(
+                window,
+                [
+                    "status",
+                    0,
+                    "Proxy: running\nTunnel: running\nAuto repair: running\nApplication network: proxy\nCodex authentication: sign-in required"
+                ]);
+            if (statusText.Text != "需要登录 Codex")
+            {
+                throw new InvalidOperationException(
+                    "Missing remote Codex authentication was incorrectly shown as connected.");
+            }
+            Console.WriteLine("PASS  Missing Codex authentication is shown separately from network health.");
+
             var embeddedTypes = new[]
             {
                 typeof(AddServerPanel),
