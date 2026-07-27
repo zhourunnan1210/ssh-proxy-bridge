@@ -642,7 +642,11 @@ function Invoke-SshWithInput($Configuration, [string]$RemoteCommand, [string]$In
     return Invoke-NativeProcessWithTimeout $sshExe $arguments $InputText 35 $environment
 }
 
-function Install-RemoteProxyEnvironment($Configuration) {
+function Install-RemoteProxyEnvironment(
+    $Configuration,
+    [ValidateSet('direct', 'proxy')]
+    [string]$Route = 'proxy'
+) {
     if (-not (Test-SshLogin $Configuration -Quiet)) {
         throw 'SSH login is required before remote setup.'
     }
@@ -650,7 +654,18 @@ function Install-RemoteProxyEnvironment($Configuration) {
     $port = [int]$Configuration.ssh.remoteProxyPort
     $start = '# >>> codex-remote-proxy >>>'
     $end = '# <<< codex-remote-proxy <<<'
-    $block = @"
+    $block = if ($Route -eq 'direct') {
+        @"
+$start
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+export NO_PROXY='localhost,127.0.0.1,::1'
+export no_proxy="`$NO_PROXY"
+export SSH_PROXY_BRIDGE_ROUTE='direct'
+$end
+"@
+    }
+    else {
+        @"
 $start
 if timeout 1 bash -c '</dev/tcp/$hostName/$port' 2>/dev/null; then
     export HTTP_PROXY='http://$hostName`:$port'
@@ -659,28 +674,46 @@ if timeout 1 bash -c '</dev/tcp/$hostName/$port' 2>/dev/null; then
     export https_proxy="`$HTTPS_PROXY"
     export NO_PROXY='localhost,127.0.0.1,::1'
     export no_proxy="`$NO_PROXY"
+    export SSH_PROXY_BRIDGE_ROUTE='proxy'
 else
     unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+    unset SSH_PROXY_BRIDGE_ROUTE
 fi
 $end
 "@
+    }
     $script = @"
 set -eu
 file="`$HOME/.bashrc"
 touch "`$file"
 tmp=`$(mktemp)
+trap 'rm -f "`$tmp"' EXIT
 awk '
 BEGIN { skip=0 }
-`$0 == "$start" { skip=1; next }
-`$0 == "$end" { skip=0; next }
-skip == 0 { print }
+{
+    normalized=`$0
+    sub(/\r`$/, "", normalized)
+    if (normalized == "$start") { skip=1; next }
+    if (normalized == "$end") { skip=0; next }
+    if (skip == 0) {
+        sub(/\r`$/, "", `$0)
+        print
+    }
+}
 ' "`$file" > "`$tmp"
 printf '\n' >> "`$tmp"
 printf %s __BLOCK_BASE64__ | base64 -d >> "`$tmp"
 printf '\n' >> "`$tmp"
+bash -n "`$tmp"
+chmod --reference="`$file" "`$tmp" 2>/dev/null || true
 mv "`$tmp" "`$file"
+trap - EXIT
 "@
-    $blockBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($block.Trim()))
+    # PowerShell here-strings use CRLF on Windows. Linux shell profiles must
+    # receive LF-only content; otherwise exact marker cleanup stops being
+    # idempotent and Bash can parse the managed block as an unterminated if.
+    $blockLf = $block.Replace("`r", '').Trim()
+    $blockBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($blockLf))
     $script = $script.Replace('__BLOCK_BASE64__', $blockBase64)
     $scriptBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
     $remoteCommand = "printf %s $scriptBase64 | base64 -d | bash"
@@ -688,7 +721,7 @@ mv "`$tmp" "`$file"
     if ($result.ExitCode -ne 0) {
         throw "Remote environment setup failed: $($result.Output -join ' ')"
     }
-    Write-Pass 'Remote ~/.bashrc proxy environment block installed.'
+    Write-Pass "Remote ~/.bashrc application network route installed: $Route."
 }
 
 function Test-ManagedTunnelProcess($Configuration, $Process) {
@@ -1039,12 +1072,67 @@ function Start-Tunnel($Configuration) {
     return $process
 }
 
+function Test-RemoteDirectCodex($Configuration, [switch]$Quiet) {
+    $script = @'
+set -u
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+target='https://chatgpt.com/backend-api/codex/responses'
+code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --noproxy '*' --connect-timeout 8 --max-time 15 \
+    -X POST -H 'content-type: application/json' --data '{}' \
+    "$target" 2>/dev/null || true)
+case "$code" in
+    400|401)
+        printf 'CODEX_DIRECT_OK:%s\n' "$code"
+        exit 0
+        ;;
+esac
+printf 'CODEX_DIRECT_FAILED:%s\n' "${code:-none}"
+exit 1
+'@
+    $scriptBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
+    $command = "printf %s $scriptBase64 | base64 -d | bash"
+    $result = Invoke-Ssh $Configuration $command -UseAlias
+    $marker = (($result.Output | Where-Object {
+                $_ -match '^CODEX_DIRECT_'
+            } | Select-Object -First 1) -as [string])
+    $marker = if ($marker) { $marker.Trim() } else { '' }
+    $ok = $result.ExitCode -eq 0 -and $marker -match '^CODEX_DIRECT_OK:'
+    if (-not $Quiet) {
+        if ($ok) {
+            Write-Pass "The server can reach the Codex endpoint directly ($marker)."
+        }
+        else {
+            Write-Warn 'The server cannot reach the Codex endpoint directly; the Windows proxy tunnel is required.'
+        }
+    }
+    return $ok
+}
+
+function Select-RemoteCodexRoute($Configuration) {
+    if (Test-RemoteDirectCodex $Configuration) {
+        return 'direct'
+    }
+    return 'proxy'
+}
+
 function Test-RemoteProxy($Configuration) {
     $url = "http://$($Configuration.ssh.remoteProxyHost):$($Configuration.ssh.remoteProxyPort)"
     $urlBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($url))
     $script = @'
 set -u
 proxy=$(printf %s __PROXY_BASE64__ | base64 -d)
+codex_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 8 --max-time 15 --proxy "$proxy" \
+    -X POST -H 'content-type: application/json' --data '{}' \
+    'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
+case "$codex_code" in
+    400|401)
+        printf 'CODEX_REMOTE_PROXY_OK:codex:%s\n' "$codex_code"
+        exit 0
+        ;;
+esac
 probe() {
     name="$1"
     target="$2"
@@ -1071,6 +1159,184 @@ exit 1
         Write-Pass "The server can reach the internet through the Windows proxy tunnel ($marker)."
     }
     else { Write-Fail "Remote proxy validation failed: $($result.Output -join ' ')" }
+    return $ok
+}
+
+function Test-RemoteApplicationNetwork($Configuration, [switch]$Quiet) {
+    $expected = "http://$($Configuration.ssh.remoteProxyHost):$($Configuration.ssh.remoteProxyPort)"
+    $expectedBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expected))
+    $script = @'
+set -u
+expected=$(printf %s __EXPECTED_BASE64__ | base64 -d)
+if ! bash -n "$HOME/.bashrc" 2>/dev/null; then
+    printf 'APPLICATION_NETWORK_BASHRC_INVALID\n'
+    exit 1
+fi
+shell_state=$(bash -ic 'printf "%s\n%s" "${SSH_PROXY_BRIDGE_ROUTE:-}" "${HTTPS_PROXY:-}"' 2>/dev/null || true)
+route=$(printf '%s\n' "$shell_state" | sed -n '1p')
+shell_proxy=$(printf '%s\n' "$shell_state" | sed -n '2p')
+case "$route" in
+    direct)
+        if [ -n "$shell_proxy" ]; then
+            printf 'APPLICATION_NETWORK_SHELL_MISMATCH:direct\n'
+            exit 1
+        fi
+        unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+        direct_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            --noproxy '*' --connect-timeout 8 --max-time 15 \
+            -X POST -H 'content-type: application/json' --data '{}' \
+            'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
+        case "$direct_code" in
+            400|401) ;;
+            *)
+                printf 'APPLICATION_NETWORK_DIRECT_FAILED:%s\n' "${direct_code:-none}"
+                exit 1
+                ;;
+        esac
+        ;;
+    proxy)
+        if [ "$shell_proxy" != "$expected" ]; then
+            printf 'APPLICATION_NETWORK_SHELL_MISMATCH:proxy\n'
+            exit 1
+        fi
+        ;;
+    *)
+        printf 'APPLICATION_NETWORK_ROUTE_MISSING\n'
+        exit 1
+        ;;
+esac
+total=0
+ready=0
+extension_prefix="$HOME/.vscode-server/extensions/openai.chatgpt-"
+for proc in /proc/[0-9]*; do
+    [ -r "$proc/cmdline" ] && [ -r "$proc/environ" ] || continue
+    command_line=$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)
+    case "$command_line" in
+        *"$extension_prefix"*) ;;
+        *) continue ;;
+    esac
+    total=$((total + 1))
+    process_route=$(tr '\0' '\n' <"$proc/environ" |
+        sed -n 's/^SSH_PROXY_BRIDGE_ROUTE=//p' | head -n 1)
+    process_proxy=$(tr '\0' '\n' <"$proc/environ" |
+        sed -n 's/^HTTPS_PROXY=//p' | head -n 1)
+    case "$route" in
+        direct)
+            [ "$process_route" = 'direct' ] && [ -z "$process_proxy" ] &&
+                ready=$((ready + 1))
+            ;;
+        proxy)
+            [ "$process_route" = 'proxy' ] && [ "$process_proxy" = "$expected" ] &&
+                ready=$((ready + 1))
+            ;;
+    esac
+done
+if [ "$total" -eq 0 ]; then
+    printf 'APPLICATION_NETWORK_READY:%s:no-active-codex\n' "$route"
+    exit 0
+fi
+if [ "$ready" -ne "$total" ]; then
+    printf 'APPLICATION_NETWORK_PROCESS_MISMATCH:%s:%s/%s\n' "$route" "$ready" "$total"
+    exit 1
+fi
+printf 'APPLICATION_NETWORK_READY:%s:%s/%s\n' "$route" "$ready" "$total"
+'@
+    $script = $script.Replace('__EXPECTED_BASE64__', $expectedBase64)
+    $scriptBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
+    $command = "printf %s $scriptBase64 | base64 -d | bash"
+    $result = Invoke-Ssh $Configuration $command -UseAlias
+    $marker = (($result.Output | Where-Object {
+                $_ -match '^APPLICATION_NETWORK_'
+            } | Select-Object -First 1) -as [string])
+    $marker = if ($marker) { $marker.Trim() } else { '' }
+    $ok = $result.ExitCode -eq 0 -and
+        $marker -match '^APPLICATION_NETWORK_READY:(direct|proxy):'
+    $script:LastApplicationNetworkRoute = if ($ok) {
+        ($marker -split ':')[1]
+    }
+    else {
+        'not ready'
+    }
+    if (-not $Quiet) {
+        if ($ok) {
+            if ($marker -match ':no-active-codex$') {
+                Write-Pass "Remote application network route is $($script:LastApplicationNetworkRoute); no active Codex process needs validation."
+            }
+            else {
+                Write-Pass "Remote Codex processes inherited the $($script:LastApplicationNetworkRoute) network route ($marker)."
+            }
+        }
+        elseif ($marker -eq 'APPLICATION_NETWORK_BASHRC_INVALID') {
+            Write-Fail 'Remote ~/.bashrc has a syntax error; Codex cannot inherit the managed network route.'
+        }
+        elseif ($marker -match '^APPLICATION_NETWORK_SHELL_MISMATCH:') {
+            Write-Fail "A new remote Bash shell did not inherit the selected application network route ($marker)."
+        }
+        elseif ($marker -match '^APPLICATION_NETWORK_PROCESS_MISMATCH:') {
+            Write-Fail "Active remote Codex processes are using a stale application network route ($marker)."
+        }
+        elseif ($marker -match '^APPLICATION_NETWORK_DIRECT_FAILED:') {
+            Write-Fail 'The managed route is direct, but the server can no longer reach the Codex endpoint directly.'
+        }
+        else {
+            Write-Fail "Remote application network validation failed: $($result.Output -join ' ')"
+        }
+    }
+    return $ok
+}
+
+function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet) {
+    $script = @'
+set -u
+auth_file="$HOME/.codex/auth.json"
+if [ -s "$auth_file" ]; then
+    mode=$(sed -n 's/.*"auth_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$auth_file" | head -n 1)
+    case "$mode" in
+        chatgpt|apikey)
+            printf 'CODEX_AUTH_READY:%s\n' "$mode"
+            exit 0
+            ;;
+    esac
+    if grep -Eq '"(access_token|id_token|OPENAI_API_KEY)"[[:space:]]*:' "$auth_file"; then
+        printf 'CODEX_AUTH_READY:file\n'
+        exit 0
+    fi
+fi
+for proc in /proc/[0-9]*; do
+    [ -r "$proc/cmdline" ] && [ -r "$proc/environ" ] || continue
+    command_line=$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)
+    case "$command_line" in
+        *"$HOME/.vscode-server/extensions/openai.chatgpt-"*) ;;
+        *) continue ;;
+    esac
+    if tr '\0' '\n' <"$proc/environ" |
+        grep -Eq '^(OPENAI_API_KEY|CODEX_API_KEY)=.+'; then
+        printf 'CODEX_AUTH_READY:process-env\n'
+        exit 0
+    fi
+done
+printf 'CODEX_AUTH_SIGN_IN_REQUIRED\n'
+exit 1
+'@
+    $scriptBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
+    $command = "printf %s $scriptBase64 | base64 -d | bash"
+    $result = Invoke-Ssh $Configuration $command -UseAlias
+    $marker = (($result.Output | Where-Object {
+                $_ -match '^CODEX_AUTH_'
+            } | Select-Object -First 1) -as [string])
+    $marker = if ($marker) { $marker.Trim() } else { '' }
+    $ok = $result.ExitCode -eq 0 -and $marker -match '^CODEX_AUTH_READY:'
+    if (-not $Quiet) {
+        if ($ok) {
+            Write-Pass "Remote Codex authentication is configured ($marker)."
+        }
+        else {
+            Write-Fail 'Remote Codex authentication is missing. Open Codex in the remote VS Code window and sign in with ChatGPT.'
+        }
+    }
     return $ok
 }
 
@@ -1107,6 +1373,7 @@ function Start-VsCode($Configuration) {
 
 function Invoke-Doctor($Configuration) {
     $failures = 0
+    $localProxyBlockingFailures = 0
     Write-Step 'Checking local commands'
     $commands = @('ssh.exe', 'code.cmd', 'curl.exe')
     if (-not (Test-PasswordGatewayMode $Configuration)) {
@@ -1120,8 +1387,8 @@ function Invoke-Doctor($Configuration) {
     Write-Step 'Checking local proxy'
     $listeners = @(Get-PortListeners ([int]$Configuration.proxy.port))
     if ($listeners.Count -eq 0) {
-        Write-Fail "No TCP listener was found on port $($Configuration.proxy.port)."
-        $failures++
+        Write-Warn "No TCP listener was found on port $($Configuration.proxy.port). This is only blocking if the server needs the proxy fallback."
+        $localProxyBlockingFailures++
     }
     else {
         Write-Pass "Proxy port $($Configuration.proxy.port) is listening."
@@ -1148,8 +1415,8 @@ function Invoke-Doctor($Configuration) {
         }
     }
     else {
-        Write-Fail "HTTP proxy probe failed ($($http.Detail))."
-        $failures++
+        Write-Warn "HTTP proxy probe failed ($($http.Detail)). This is only blocking if the server needs the proxy fallback."
+        $localProxyBlockingFailures++
     }
     if ($socks.Success) {
         Write-Pass "SOCKS5 proxy probe succeeded via $($socks.Target) (status $($socks.Status))."
@@ -1181,25 +1448,61 @@ function Invoke-Doctor($Configuration) {
         }
     }
 
+    Write-Step 'Selecting the server application network route'
+    $selectedRoute = Select-RemoteCodexRoute $Configuration
+    if ($selectedRoute -eq 'direct') {
+        Write-Pass 'Selected route: server direct connection. The Windows proxy tunnel is optional.'
+    }
+    else {
+        Write-Warn 'Selected route: Windows proxy tunnel fallback.'
+        $failures += $localProxyBlockingFailures
+    }
+
     Write-Step 'Checking managed reverse tunnel'
     $tunnel = Get-TunnelProcess $Configuration
-    if ($tunnel) {
-        Write-Pass "Managed SSH tunnel is running (PID $($tunnel.Id))."
-        if (-not (Test-RemoteProxy $Configuration)) {
+    if ($selectedRoute -eq 'proxy') {
+        if ($tunnel) {
+            Write-Pass "Managed SSH tunnel is running (PID $($tunnel.Id))."
+            if (-not (Test-RemoteProxy $Configuration)) {
+                $failures++
+            }
+        }
+        else {
+            Write-Fail 'The server needs the Windows proxy, but the managed SSH tunnel is not running.'
             $failures++
         }
     }
+    elseif ($tunnel) {
+        Write-Pass "Managed SSH tunnel is also running (PID $($tunnel.Id)), but the direct route does not depend on it."
+    }
     else {
-        Write-Warn 'Managed SSH tunnel is not running. Use start to establish it.'
+        Write-Pass 'Managed SSH tunnel is not required for the selected direct route.'
+    }
+
+    if (-not (Test-RemoteApplicationNetwork $Configuration)) {
+        $failures++
+    }
+    if (-not (Test-RemoteCodexAuthentication $Configuration)) {
+        $failures++
     }
 
     $monitor = Get-MonitorProcess
-    if ($monitor) {
-        Write-Pass "Automatic tunnel repair is running (PID $($monitor.Id))."
+    if ($selectedRoute -eq 'proxy') {
+        if ($monitor) {
+            Write-Pass "Automatic tunnel repair is running (PID $($monitor.Id))."
+        }
+        else {
+            Write-Warn 'Automatic tunnel repair is not running. Use start or repair to enable it.'
+            $failures++
+        }
+    }
+    elseif ($monitor) {
+        Write-Pass "Automatic tunnel repair is available (PID $($monitor.Id)), but is not required by the direct route."
     }
     else {
-        Write-Warn 'Automatic tunnel repair is not running. Use start or repair to enable it.'
+        Write-Pass 'Automatic tunnel repair is not required for the selected direct route.'
     }
+
     $monitorLog = Get-StatePath 'monitor.events.log'
     if (Test-Path -LiteralPath $monitorLog -PathType Leaf) {
         Write-Host '       Recent repair events:'
@@ -1262,30 +1565,59 @@ try {
             if (-not (Test-SshLogin $configuration)) {
                 throw 'Complete SSH initialization in SSH Proxy Bridge first.'
             }
-            Install-RemoteProxyEnvironment $configuration
-            Write-Pass 'Setup is complete.'
+            $selectedRoute = Select-RemoteCodexRoute $configuration
+            Install-RemoteProxyEnvironment $configuration $selectedRoute
+            Write-Pass "Setup is complete. Selected application route: $selectedRoute."
         }
         'start' {
-            Start-ProxyIfNeeded $configuration
             Install-SshConfig $configuration
             if (-not (Test-SshLogin $configuration)) {
                 throw 'Complete SSH initialization in SSH Proxy Bridge first.'
             }
-            $null = Start-Tunnel $configuration
-            if (-not (Test-RemoteProxy $configuration)) {
-                throw 'The SSH tunnel is running, but remote proxy validation failed.'
+            $selectedRoute = Select-RemoteCodexRoute $configuration
+            if ($selectedRoute -eq 'direct') {
+                Install-RemoteProxyEnvironment $configuration 'direct'
+                Write-Pass 'Server direct route selected; the Windows proxy tunnel is not required.'
             }
-            $null = Start-Monitor $configuration
-            Install-RemoteProxyEnvironment $configuration
+            else {
+                Start-ProxyIfNeeded $configuration
+                $null = Start-Tunnel $configuration
+                if (-not (Test-RemoteProxy $configuration)) {
+                    throw 'The SSH tunnel is running, but remote proxy validation failed.'
+                }
+                $null = Start-Monitor $configuration
+                Install-RemoteProxyEnvironment $configuration 'proxy'
+                Write-Pass 'Windows proxy tunnel fallback selected.'
+            }
             Start-VsCode $configuration
-            Write-Pass 'Codex remote proxy workflow started.'
+            $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
+            Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
+            $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
+            Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
+            Write-Pass "Codex remote network workflow started (route: $selectedRoute)."
         }
         'repair' {
-            Start-ProxyIfNeeded $configuration
             Install-SshConfig $configuration
-            $null = Repair-Tunnel $configuration
-            $null = Start-Monitor $configuration
-            Write-Pass 'Tunnel repair and automatic monitoring are ready.'
+            if (-not (Test-SshLogin $configuration)) {
+                throw 'Complete SSH initialization in SSH Proxy Bridge first.'
+            }
+            $selectedRoute = Select-RemoteCodexRoute $configuration
+            if ($selectedRoute -eq 'direct') {
+                Install-RemoteProxyEnvironment $configuration 'direct'
+                Write-Pass 'The server direct route is healthy; tunnel repair was not required.'
+            }
+            else {
+                Start-ProxyIfNeeded $configuration
+                $null = Repair-Tunnel $configuration
+                $null = Start-Monitor $configuration
+                Install-RemoteProxyEnvironment $configuration 'proxy'
+                Write-Pass 'Tunnel repair and automatic monitoring are ready.'
+            }
+            $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
+            Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
+            $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
+            Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
+            Write-Pass "Application network route repaired (route: $selectedRoute)."
         }
         'monitor' {
             Invoke-TunnelMonitor $configuration
@@ -1294,9 +1626,13 @@ try {
             $proxyOk = Test-TcpPort ([string]$configuration.proxy.host) ([int]$configuration.proxy.port)
             $tunnel = Get-TunnelProcess $configuration
             $monitor = Get-MonitorProcess
+            $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
+            $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Proxy:  $(if ($proxyOk) { 'running' } else { 'not ready' })"
             Write-Host "Tunnel: $(if ($tunnel) { "running (PID $($tunnel.Id))" } else { 'stopped' })"
             Write-Host "Auto repair: $(if ($monitor) { "running (PID $($monitor.Id))" } else { 'stopped' })"
+            Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
+            Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
             $loginLabel = if (Test-PasswordGatewayMode $configuration) { 'SSH password gateway login' } else { 'SSH key login' }
             Write-Host "$loginLabel`: $(if (Test-SshLogin $configuration -Quiet) { 'ready' } else { 'not ready' })"
         }

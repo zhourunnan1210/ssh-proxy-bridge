@@ -886,10 +886,43 @@ public partial class MainWindow : Window
         var autoRepairRunning = output.Contains("Auto repair: running", StringComparison.OrdinalIgnoreCase)
                                 || output.Contains("Automatic tunnel repair started", StringComparison.OrdinalIgnoreCase)
                                 || output.Contains("Automatic tunnel repair is already running", StringComparison.OrdinalIgnoreCase);
+        var applicationNetworkNotReady = output.Contains(
+                                                "Application network: not ready",
+                                                StringComparison.OrdinalIgnoreCase)
+                                         || output.Contains(
+                                                "Application proxy: not ready",
+                                                StringComparison.OrdinalIgnoreCase);
+        var applicationNetworkDirect = output.Contains(
+            "Application network: direct",
+            StringComparison.OrdinalIgnoreCase);
+        var applicationNetworkProxy = output.Contains(
+            "Application network: proxy",
+            StringComparison.OrdinalIgnoreCase);
+        var applicationNetworkReady = applicationNetworkDirect || applicationNetworkProxy;
+        var requiresApplicationNetwork = command is "start" or "repair" or "status";
+        var codexSignInRequired = output.Contains(
+            "Codex authentication: sign-in required",
+            StringComparison.OrdinalIgnoreCase);
 
         if (command == "stop")
         {
             SetState("已停止", StateKind.Idle);
+        }
+        else if (codexSignInRequired)
+        {
+            SetState("需要登录 Codex", StateKind.Error);
+        }
+        else if (applicationNetworkNotReady)
+        {
+            SetState("需要处理", StateKind.Error);
+        }
+        else if (requiresApplicationNetwork && !applicationNetworkReady)
+        {
+            SetState("需要处理", StateKind.Error);
+        }
+        else if (applicationNetworkDirect)
+        {
+            SetState("已连接 · 服务器直连", StateKind.Connected);
         }
         else if (command is "start" or "repair"
                  || (tunnelRunning && autoRepairRunning))
