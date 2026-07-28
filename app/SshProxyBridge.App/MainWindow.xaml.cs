@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -28,7 +29,9 @@ public partial class MainWindow : Window
     private readonly SshBootstrapService _bootstrapService = new();
     private ProfileListItem? _selectedProfile;
     private bool _operationInProgress;
+    private bool _suppressSelectionStatus;
     private int _proxyProbeGeneration;
+    private int _profileSelectionGeneration;
     private bool _productDocumentLoaded;
 
     public MainWindow()
@@ -51,8 +54,12 @@ public partial class MainWindow : Window
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await LoadProfilesAsync();
-        if (_selectedProfile?.IsLegacy == true)
+        if (_selectedProfile?.ConfigPath is not null
+            && (_selectedProfile.IsLegacy
+                || _selectedProfile.Profile.Status == ProfileStatus.Ready))
+        {
             await RunWorkflowAsync("status", "正在检查连接状态…", showFailureDialog: false);
+        }
     }
 
     private async Task LoadProfilesAsync(Guid? selectProfileId = null)
@@ -98,23 +105,31 @@ public partial class MainWindow : Window
             LogTextBox.Text = $"读取应用 Profile 失败：{exception.Message}";
         }
 
-        ProfileSelector.ItemsSource = profiles;
-        var selected = selectProfileId.HasValue
-            ? profiles.FirstOrDefault(item => item.Profile.Id == selectProfileId.Value)
-            : profiles.FirstOrDefault(item => item.IsLegacy) ?? profiles.FirstOrDefault();
+        _suppressSelectionStatus = true;
+        try
+        {
+            ProfileSelector.ItemsSource = profiles;
+            var selected = selectProfileId.HasValue
+                ? profiles.FirstOrDefault(item => item.Profile.Id == selectProfileId.Value)
+                : profiles.FirstOrDefault(item => item.IsLegacy) ?? profiles.FirstOrDefault();
 
-        if (selected is not null)
-        {
-            ProfileSelector.SelectedItem = selected;
+            if (selected is not null)
+            {
+                ProfileSelector.SelectedItem = selected;
+            }
+            else
+            {
+                _selectedProfile = null;
+                EndpointText.Text = "尚未添加服务器";
+                WorkspaceText.Text = "—";
+                ProxySummaryText.Text = "等待配置";
+                SetState("没有服务器", StateKind.Idle);
+                SetButtonsEnabled(false);
+            }
         }
-        else
+        finally
         {
-            _selectedProfile = null;
-            EndpointText.Text = "尚未添加服务器";
-            WorkspaceText.Text = "—";
-            ProxySummaryText.Text = "等待配置";
-            SetState("没有服务器", StateKind.Idle);
-            SetButtonsEnabled(false);
+            _suppressSelectionStatus = false;
         }
     }
 
@@ -158,10 +173,41 @@ public partial class MainWindow : Window
 
     private async void ProfileSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        _selectedProfile = ProfileSelector.SelectedItem as ProfileListItem;
+        var selectionGeneration = ++_profileSelectionGeneration;
+        var selectedProfile = ProfileSelector.SelectedItem as ProfileListItem;
+        _selectedProfile = selectedProfile;
         DisplaySelectedProfile();
-        if (_selectedProfile is not null)
-            await RefreshLocalProxyIndicatorAsync(_selectedProfile.Profile);
+        LastCheckedText.Text = "尚未检查";
+        ProxyDot.Fill = new SolidColorBrush(Color.FromRgb(148, 163, 184));
+        var shouldRefreshStatus = ShouldAutoRefreshSelection(
+            _suppressSelectionStatus,
+            _operationInProgress,
+            selectedProfile?.ConfigPath is not null,
+            selectedProfile?.IsLegacy == true,
+            selectedProfile?.Profile.Status);
+
+        if (selectedProfile is null)
+            return;
+
+        if (shouldRefreshStatus)
+        {
+            SetState("正在检查", StateKind.Working);
+            LogTextBox.Text =
+                $"已切换到“{selectedProfile.Profile.Name}”，正在读取该服务器自己的连接状态…";
+        }
+
+        await RefreshLocalProxyIndicatorAsync(selectedProfile.Profile);
+        if (!shouldRefreshStatus
+            || selectionGeneration != _profileSelectionGeneration
+            || _selectedProfile?.Profile.Id != selectedProfile.Profile.Id)
+        {
+            return;
+        }
+
+        await RunWorkflowAsync(
+            "status",
+            $"正在检查“{selectedProfile.Profile.Name}”的连接状态…",
+            showFailureDialog: false);
     }
 
     private async Task RefreshLocalProxyIndicatorAsync(ConnectionProfile profile)
@@ -245,7 +291,7 @@ public partial class MainWindow : Window
     {
         await RunWorkflowAsync(
             "repair",
-            "正在检查并修复代理隧道；修复过程不会重复打开 VS Code…",
+            "正在分层检查 SSH、网络路线和 Codex 进程；不会在未经确认时重载 VS Code…",
             showFailureDialog: true);
     }
 
@@ -344,6 +390,9 @@ public partial class MainWindow : Window
         ConnectionProfile profile,
         DeleteProfileRequest request)
     {
+        var configPath = _selectedProfile?.ConfigPath
+                         ?? throw new InvalidOperationException(
+                             "待删除 Profile 缺少运行配置，无法执行安全清理。");
         _operationInProgress = true;
         SetButtonsEnabled(false);
         try
@@ -352,7 +401,7 @@ public partial class MainWindow : Window
             {
                 SetState("正在停止 Profile 隧道", StateKind.Working);
                 LogTextBox.Text = "正在停止待删除 Profile 自己的受管隧道；不会停止“当前连接”的旧隧道…";
-                var stopResult = await RunPowerShellAsync("stop");
+                var stopResult = await RunPowerShellAsync("stop", configPath);
                 if (stopResult.ExitCode != 0)
                 {
                     var detail = string.Join(Environment.NewLine,
@@ -379,7 +428,7 @@ public partial class MainWindow : Window
             {
                 await ShowNoticeAsync(
                     "删除完成并带有警告",
-                    "Profile 已删除，但部分可选本地清理未完成。详情已显示在运行信息中。",
+                    "Profile 已删除，但部分可选本地清理未完成。详情已显示在“当前状态”的技术详情中。",
                     compact: true);
             }
         }
@@ -492,6 +541,20 @@ public partial class MainWindow : Window
         {
             CloseOverlay();
             completion.TrySetResult(result);
+        };
+        ShowOverlay(panel);
+        return completion.Task;
+    }
+
+    private Task<bool> RequestRouteReloadAsync(string message)
+    {
+        var completion = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var panel = new RouteReloadPanel(message);
+        panel.Completed += reload =>
+        {
+            CloseOverlay();
+            completion.TrySetResult(reload);
         };
         ShowOverlay(panel);
         return completion.Task;
@@ -723,13 +786,117 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task RunWorkflowAsync(string command, string progressMessage, bool showFailureDialog)
+    internal static bool ShouldAutoRefreshSelection(
+        bool selectionStatusSuppressed,
+        bool operationInProgress,
+        bool hasConfigPath,
+        bool isLegacy,
+        ProfileStatus? status)
+    {
+        return !selectionStatusSuppressed
+               && !operationInProgress
+               && hasConfigPath
+               && (isLegacy || status == ProfileStatus.Ready);
+    }
+
+    internal static bool IsSameWorkflowProfile(
+        Guid operationProfileId,
+        string operationConfigPath,
+        Guid selectedProfileId,
+        string? selectedConfigPath)
+    {
+        return operationProfileId == selectedProfileId
+               && string.Equals(
+                   operationConfigPath,
+                   selectedConfigPath,
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static string BuildProfileScopedLog(
+        string profileName,
+        string endpoint,
+        string sshAlias,
+        string content)
+    {
+        var displayName = string.IsNullOrWhiteSpace(profileName)
+            ? sshAlias
+            : profileName;
+        return
+            $"结果对应服务器：{displayName}（{endpoint}，SSH 别名 {sshAlias}）\n\n" +
+            content;
+    }
+
+    private static WorkflowProfileContext CaptureWorkflowProfile(ProfileListItem item)
+    {
+        var profile = item.Profile;
+        return new WorkflowProfileContext(
+            profile.Id,
+            profile.Name,
+            item.ConfigPath
+            ?? throw new InvalidOperationException("Profile 缺少运行配置。"),
+            $"{profile.Ssh.User}@{profile.Ssh.Host}:{profile.Ssh.Port}",
+            profile.Ssh.Alias);
+    }
+
+    private bool IsWorkflowProfileCurrent(WorkflowProfileContext context)
+    {
+        var selected = _selectedProfile;
+        return selected is not null
+               && IsSameWorkflowProfile(
+                   context.ProfileId,
+                   context.ConfigPath,
+                   selected.Profile.Id,
+                   selected.ConfigPath);
+    }
+
+    private static string BuildProfileScopedLog(
+        WorkflowProfileContext context,
+        string content)
+    {
+        return BuildProfileScopedLog(
+            context.ProfileName,
+            context.Endpoint,
+            context.SshAlias,
+            content);
+    }
+
+    private bool PrepareForSelectedProfileRefresh(WorkflowProfileContext completedContext)
+    {
+        var selected = _selectedProfile;
+        if (selected is null)
+        {
+            SetState("服务器已切换", StateKind.Idle);
+            LogTextBox.Text =
+                $"已忽略“{completedContext.ProfileName}”的旧结果，因为当前没有选中的服务器。";
+            return false;
+        }
+
+        var canRefresh = selected.ConfigPath is not null
+                         && (selected.IsLegacy
+                             || selected.Profile.Status == ProfileStatus.Ready);
+        SetState(
+            canRefresh ? "正在检查当前服务器" : "服务器已切换",
+            canRefresh ? StateKind.Working : StateKind.Idle);
+        LogTextBox.Text =
+            $"已忽略“{completedContext.ProfileName}”的旧结果，因为当前已切换到“{selected.Profile.Name}”。\n" +
+            (canRefresh
+                ? "正在对当前服务器重新执行只读状态检查…"
+                : "当前服务器尚未完成初始化，因此没有自动执行状态检查。");
+        return canRefresh;
+    }
+
+    private async Task RunWorkflowAsync(
+        string command,
+        string progressMessage,
+        bool showFailureDialog,
+        bool refreshAfterProfileSwitch = true)
     {
         if (_operationInProgress)
             return;
 
-        if (_selectedProfile is null
-            || (!_selectedProfile.IsLegacy && _selectedProfile.Profile.Status != ProfileStatus.Ready))
+        var operationProfile = _selectedProfile;
+        if (operationProfile is null
+            || (!operationProfile.IsLegacy && operationProfile.Profile.Status != ProfileStatus.Ready))
         {
             SetState("尚未就绪", StateKind.Working);
             LogTextBox.Text =
@@ -737,49 +904,76 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_toolRoot is null || _selectedProfile.ConfigPath is null)
+        if (_toolRoot is null || operationProfile.ConfigPath is null)
         {
             SetState("找不到工具目录", StateKind.Error);
             LogTextBox.Text = "无法定位 ssh-proxy-bridge.ps1。请从完整发行目录运行应用。";
             return;
         }
 
+        var operationContext = CaptureWorkflowProfile(operationProfile);
         _operationInProgress = true;
         SetButtonsEnabled(false);
         SetState("处理中", StateKind.Working);
-        LogTextBox.Text = progressMessage;
+        LogTextBox.Text = BuildProfileScopedLog(operationContext, progressMessage);
+        var reloadAfterRepair = false;
+        var refreshSelectedProfile = false;
 
         try
         {
-            var result = await RunPowerShellAsync(command);
+            var result = await RunPowerShellAsync(command, operationContext.ConfigPath);
             var output = string.Join(Environment.NewLine,
                 new[] { result.StandardOutput, result.StandardError }
                     .Where(value => !string.IsNullOrWhiteSpace(value)));
 
-            LogTextBox.Text = string.IsNullOrWhiteSpace(output)
-                ? $"命令 {command} 已完成。"
-                : output.Trim();
-            LogTextBox.ScrollToEnd();
-            LastCheckedText.Text = $"最后检查 {DateTime.Now:HH:mm:ss}";
-
-            UpdateStateFromResult(command, result.ExitCode, output);
-
-            if (result.ExitCode != 0 && showFailureDialog)
+            if (!IsWorkflowProfileCurrent(operationContext))
             {
-                await ShowNoticeAsync(
-                    "操作没有成功",
-                    "详细信息已显示在服务器页面下方。密码和私钥不会写入该日志。",
-                    compact: true);
+                refreshSelectedProfile = PrepareForSelectedProfileRefresh(operationContext);
+            }
+            else
+            {
+                LogTextBox.Text = BuildProfileScopedLog(
+                    operationContext,
+                    BuildUserFacingLog(command, output));
+                LogTextBox.ScrollToHome();
+                LastCheckedText.Text = $"最后检查 {DateTime.Now:HH:mm:ss}";
+
+                UpdateStateFromResult(command, result.ExitCode, output);
+
+                var reloadRequired = output.Contains(
+                    "reload-vscode-required",
+                    StringComparison.OrdinalIgnoreCase);
+                if (reloadRequired && showFailureDialog)
+                {
+                    reloadAfterRepair = await RequestRouteReloadAsync(
+                        BuildRouteReloadMessage(output));
+                }
+                else if (result.ExitCode != 0 && showFailureDialog)
+                {
+                    await ShowNoticeAsync(
+                        "操作没有成功",
+                        BuildFailureMessage(output),
+                        compact: false);
+                }
             }
         }
         catch (Exception exception)
         {
-            SetState("执行失败", StateKind.Error);
-            LogTextBox.Text = exception.Message;
-
-            if (showFailureDialog)
+            if (!IsWorkflowProfileCurrent(operationContext))
             {
-                await ShowNoticeAsync("执行失败", exception.Message);
+                refreshSelectedProfile = PrepareForSelectedProfileRefresh(operationContext);
+            }
+            else
+            {
+                SetState("执行失败", StateKind.Error);
+                LogTextBox.Text = BuildProfileScopedLog(
+                    operationContext,
+                    exception.Message);
+
+                if (showFailureDialog)
+                {
+                    await ShowNoticeAsync("执行失败", exception.Message);
+                }
             }
         }
         finally
@@ -787,9 +981,37 @@ public partial class MainWindow : Window
             _operationInProgress = false;
             SetButtonsEnabled(true);
         }
+
+        if (refreshSelectedProfile)
+        {
+            if (refreshAfterProfileSwitch)
+            {
+                await RunWorkflowAsync(
+                    "status",
+                    "服务器已切换，正在重新检查当前服务器状态…",
+                    showFailureDialog: false,
+                    refreshAfterProfileSwitch: false);
+            }
+            else
+            {
+                SetState("服务器已切换", StateKind.Idle);
+                LogTextBox.Text =
+                    "检查期间服务器选择再次发生变化。旧结果已忽略；请点击“刷新状态”检查当前服务器。";
+            }
+
+            return;
+        }
+
+        if (reloadAfterRepair)
+        {
+            await RunWorkflowAsync(
+                "reload-vscode",
+                "正在重载远程 VS Code Server、重新打开项目并等待 Codex 采用新路线…",
+                showFailureDialog: true);
+        }
     }
 
-    private async Task<ProcessResult> RunPowerShellAsync(string command)
+    private async Task<ProcessResult> RunPowerShellAsync(string command, string configPath)
     {
         var scriptPath = Path.Combine(_toolRoot!, "ssh-proxy-bridge.ps1");
         var powerShellPath = Path.Combine(
@@ -817,7 +1039,9 @@ public partial class MainWindow : Window
         startInfo.ArgumentList.Add(scriptPath);
         startInfo.ArgumentList.Add(command);
         startInfo.ArgumentList.Add("-Config");
-        startInfo.ArgumentList.Add(_selectedProfile!.ConfigPath!);
+        startInfo.ArgumentList.Add(configPath);
+        if (command == "reload-vscode")
+            startInfo.ArgumentList.Add("-Force");
 
         using var process = new Process { StartInfo = startInfo };
         using var outputReadCancellation = new CancellationTokenSource();
@@ -862,20 +1086,349 @@ public partial class MainWindow : Window
     {
         "start" => TimeSpan.FromMinutes(3),
         "repair" => TimeSpan.FromMinutes(2),
+        "reload-vscode" => TimeSpan.FromMinutes(3),
         "doctor" => TimeSpan.FromMinutes(2),
         "status" => TimeSpan.FromSeconds(45),
         "stop" => TimeSpan.FromSeconds(45),
         _ => TimeSpan.FromMinutes(2)
     };
 
-    private void UpdateStateFromResult(string command, int exitCode, string output)
+    private static string BuildUserFacingLog(string command, string output)
     {
-        if (exitCode != 0)
+        if (string.IsNullOrWhiteSpace(output))
+            return $"命令 {command} 已完成，但没有返回诊断详情。";
+
+        var detail = output.Trim();
+        var applicationNetworkDirect = output.Contains(
+            "Application network: direct",
+            StringComparison.OrdinalIgnoreCase);
+        var directRouteFailed = output.Contains(
+            "APPLICATION_NETWORK_DIRECT_FAILED:",
+            StringComparison.OrdinalIgnoreCase);
+        var sshNotReady = IsSshNotReady(output);
+        var tunnelNotReady = IsTunnelNotReady(
+            output,
+            applicationNetworkDirect || directRouteFailed);
+        var applicationNetworkNotReady = output.Contains(
+                                                "Application network: not ready",
+                                                StringComparison.OrdinalIgnoreCase)
+                                         || output.Contains(
+                                                "Application proxy: not ready",
+                                                StringComparison.OrdinalIgnoreCase)
+                                         || output.Contains(
+                                                "APPLICATION_NETWORK_CHECK_FAILED",
+                                                StringComparison.OrdinalIgnoreCase);
+
+        // A failed lower layer makes every later result inconclusive. In
+        // particular, an authentication probe that could not cross SSH must
+        // never be presented as a real "sign in required" diagnosis.
+        if (sshNotReady)
         {
-            SetState("需要处理", StateKind.Error);
+            return
+                "诊断结论：服务器 SSH 登录不可用，因此后续的隧道、应用网络和 Codex 登录结果暂时无效。\n" +
+                "下一步：确认服务器在线，并核对 SSH 地址、端口和认证配置，然后再次运行诊断。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (tunnelNotReady)
+        {
+            return
+                "诊断结论：SSH 可以登录，但 Windows 本机代理或 SSH 隧道尚未就绪。\n" +
+                "下一步：确认本机代理已启动，然后运行“一键修复连接”。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        var processMismatch = Regex.Match(
+            output,
+            @"APPLICATION_NETWORK_PROCESS_MISMATCH:(direct|proxy):(\d+)/(\d+)",
+            RegexOptions.IgnoreCase);
+        if (processMismatch.Success)
+        {
+            var route = processMismatch.Groups[1].Value.Equals(
+                "proxy",
+                StringComparison.OrdinalIgnoreCase)
+                ? "Windows 代理"
+                : "服务器直连";
+            var ready = processMismatch.Groups[2].Value;
+            var total = processMismatch.Groups[3].Value;
+            return
+                "诊断结论：隧道或新网络路线已经准备好，但运行中的 Codex 仍使用旧路线。\n" +
+                $"当前路线：{route}；已采用新路线的 Codex 进程：{ready}/{total}。\n" +
+                "为什么按钮看似无效：运行中进程的环境变量无法通过修改 ~/.bashrc 热更新。\n" +
+                "下一步：点击“一键修复连接”，然后在确认面板中选择“重载并重新连接”。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (output.Contains("APPLICATION_NETWORK_BASHRC_INVALID", StringComparison.OrdinalIgnoreCase))
+        {
+            return
+                "诊断结论：服务器 ~/.bashrc 存在语法错误，Codex 无法获得网络配置。\n" +
+                "下一步：运行“一键修复连接”；如果仍失败，请保留下面的技术详情。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (output.Contains("APPLICATION_NETWORK_SHELL_MISMATCH", StringComparison.OrdinalIgnoreCase)
+            || output.Contains("APPLICATION_NETWORK_ROUTE_MISSING", StringComparison.OrdinalIgnoreCase))
+        {
+            return
+                "诊断结论：SSH 和隧道可能正常，但服务器的新 Shell 没有采用所选网络路线。\n" +
+                "下一步：运行“一键修复连接”，软件会重新写入并验证远端配置。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (directRouteFailed)
+        {
+            var noHttpResponse = output.Contains(
+                "APPLICATION_NETWORK_DIRECT_FAILED:000",
+                StringComparison.OrdinalIgnoreCase);
+            return
+                "诊断结论：服务器直连 Codex 已中断，需要切换到 Windows 代理。\n" +
+                (noHttpResponse
+                    ? "检测细节：服务器没有收到 HTTP 响应（000），常见原因是 DNS 解析、TLS 握手或服务器出口线路异常。\n"
+                    : string.Empty) +
+                "下一步：运行“一键修复连接”；若已有 Codex 进程，软件会提示是否重载远程 VS Code。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (output.Contains("APPLICATION_NETWORK_PROXY_FAILED:", StringComparison.OrdinalIgnoreCase))
+        {
+            return
+                "诊断结论：SSH 可以登录，但服务器无法通过 Windows 代理路线访问 Codex。\n" +
+                "下一步：确认 Windows 本机代理工作正常，然后运行“一键修复连接”重建并复验路线。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (output.Contains("APPLICATION_NETWORK_CODEX_NOT_RUNNING", StringComparison.OrdinalIgnoreCase))
+        {
+            return
+                "诊断结论：远程 VS Code 已启动，但等待超时前没有发现 Codex 进程。\n" +
+                "下一步：确认远程窗口已连接并启用 Codex 扩展，然后再次刷新状态。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (applicationNetworkNotReady)
+        {
+            return
+                "诊断结论：SSH 和隧道已经通过基础检查，但远程 Codex 的应用网络尚未就绪。\n" +
+                "下一步：运行“一键修复连接”；请先解决应用网络问题，再判断是否需要登录 Codex。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (IsCodexSignInRequired(output))
+        {
+            return
+                "诊断结论：网络路线正常，但远程 Codex 尚未登录。\n" +
+                "下一步：在当前服务器的 VS Code 窗口中打开 Codex，并选择使用 ChatGPT 登录。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (applicationNetworkDirect)
+        {
+            return
+                "检查结果：连接正常。\n当前路线：服务器直连 Codex，不依赖 Windows 代理隧道。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        if (output.Contains("Application network: proxy", StringComparison.OrdinalIgnoreCase))
+        {
+            return
+                "检查结果：连接正常。\n当前路线：通过 SSH 隧道使用 Windows 本机代理。\n\n" +
+                "—— 技术详情 ——\n" + detail;
+        }
+
+        return detail;
+    }
+
+    private static bool IsSshNotReady(string output)
+    {
+        return Regex.IsMatch(
+                   output,
+                   @"SSH (?:key|password gateway) login:\s*not(?:[ -])?ready",
+                   RegexOptions.IgnoreCase)
+               || Regex.IsMatch(
+                   output,
+                   @"\[FAIL\]\s*SSH (?:key|password gateway) login (?:is not ready|timed out)",
+                   RegexOptions.IgnoreCase)
+               || output.Contains("SSH endpoint is not reachable", StringComparison.OrdinalIgnoreCase)
+               || output.Contains("SSH login is not ready", StringComparison.OrdinalIgnoreCase)
+               || output.Contains("Permission denied (publickey,password)", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTunnelNotReady(string output, bool tunnelIsOptional)
+    {
+        if (tunnelIsOptional)
+            return false;
+
+        return Regex.IsMatch(
+                   output,
+                   @"(?m)^\s*Tunnel:\s*stopped\s*$",
+                   RegexOptions.IgnoreCase)
+               || Regex.IsMatch(
+                   output,
+                   @"(?m)^\s*Proxy:\s*not(?:[ -])?ready\s*$",
+                   RegexOptions.IgnoreCase)
+               || Regex.IsMatch(
+                   output,
+                   @"(?m)^\s*\[FAIL\].*(?:managed SSH tunnel|remote proxy validation)",
+                   RegexOptions.IgnoreCase);
+    }
+
+    private static bool IsCodexSignInRequired(string output)
+    {
+        return Regex.IsMatch(
+            output,
+            @"Codex authentication:\s*sign-in(?:[ -])?required",
+            RegexOptions.IgnoreCase);
+    }
+
+    private static string BuildRouteReloadMessage(string output)
+    {
+        var match = Regex.Match(
+            output,
+            @"APPLICATION_NETWORK_PROCESS_MISMATCH:(direct|proxy):(\d+)/(\d+)",
+            RegexOptions.IgnoreCase);
+        var route = match.Success
+                    && match.Groups[1].Value.Equals("proxy", StringComparison.OrdinalIgnoreCase)
+            ? "Windows 代理"
+            : "服务器直连";
+        var counts = match.Success
+            ? $"检测到 {match.Groups[3].Value} 个 Codex 进程，其中 {match.Groups[2].Value} 个已采用新路线。"
+            : "检测到运行中的 Codex 仍使用旧路线。";
+        return
+            $"SSH 和目标网络路线已经恢复，当前应使用：{route}。\n\n" +
+            $"{counts}\n" +
+            "仅修改服务器 Shell 配置不能改变已运行进程的环境，因此修复还差最后一步。\n\n" +
+            "选择“重载并重新连接”后，软件会重启该服务器的 VS Code Server、重新打开保存的远程目录，并等待 Codex 采用新路线；只有复验通过才会显示绿色。";
+    }
+
+    private static string BuildFailureMessage(string output)
+    {
+        var summary = BuildUserFacingLog("workflow", output);
+        var detailIndex = summary.IndexOf("—— 技术详情 ——", StringComparison.Ordinal);
+        if (detailIndex >= 0)
+            summary = summary[..detailIndex].Trim();
+        return summary +
+               "\n\n完整技术信息保留在主页面“查看技术详情”中；日志不会记录密码或私钥。";
+    }
+
+    internal static StatusSummaryContent ParseStatusSummary(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return new StatusSummaryContent(
+                string.Empty,
+                "尚未生成检查结果。",
+                "运行诊断或刷新状态后，这里会显示结论。");
+        }
+
+        var normalized = text
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Trim();
+        var detailIndex = normalized.IndexOf("—— 技术详情 ——", StringComparison.Ordinal);
+        var summaryText = detailIndex >= 0
+            ? normalized[..detailIndex].Trim()
+            : normalized;
+        var lines = summaryText
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        var server = string.Empty;
+        var descriptionLines = new List<string>();
+        var actionLines = new List<string>();
+
+        foreach (var line in lines)
+        {
+            if (line.StartsWith("结果对应服务器：", StringComparison.Ordinal))
+            {
+                server = line["结果对应服务器：".Length..].Trim();
+                continue;
+            }
+
+            if (line.StartsWith("下一步：", StringComparison.Ordinal))
+            {
+                actionLines.Add(line);
+                continue;
+            }
+
+            if (!LooksLikeTechnicalDetail(line))
+                descriptionLines.Add(line);
+        }
+
+        var description = string.Join(Environment.NewLine, descriptionLines.Take(4));
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            description = detailIndex >= 0
+                ? "检查已完成，详细结果已保留在下方。"
+                : "正在等待可读的检查结果。";
+        }
+
+        if (description.Length > 420)
+            description = description[..417].TrimEnd() + "…";
+
+        var action = string.Join(Environment.NewLine, actionLines);
+        if (string.IsNullOrWhiteSpace(action))
+        {
+            if (description.Contains("连接正常", StringComparison.Ordinal))
+            {
+                action = "无需处理，可以继续使用远程 Codex。";
+            }
+            else if (description.Contains("正在", StringComparison.Ordinal)
+                     || description.Contains("处理中", StringComparison.Ordinal))
+            {
+                action = "请稍候，完成后这里会自动更新。";
+            }
+        }
+
+        return new StatusSummaryContent(server, description, action);
+    }
+
+    private static bool LooksLikeTechnicalDetail(string line)
+    {
+        return Regex.IsMatch(
+                   line,
+                   @"^\[(?:PASS|FAIL|WARN|INFO)\]",
+                   RegexOptions.IgnoreCase)
+               || Regex.IsMatch(
+                   line,
+                   @"^(?:Proxy|Tunnel|Auto repair|SSH (?:login marker|login reason|key login)|Application (?:network marker|network reason|network|proxy)|Codex authentication):",
+                   RegexOptions.IgnoreCase)
+               || Regex.IsMatch(
+                   line,
+                   @"^[A-Z][A-Z0-9_]+:",
+                   RegexOptions.CultureInvariant);
+    }
+
+    private void LogTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (sender is not TextBox logTextBox
+            || StatusSummaryBody is null
+            || StatusSummaryServerText is null
+            || StatusSummaryActionText is null)
+        {
             return;
         }
 
+        var summary = ParseStatusSummary(logTextBox.Text);
+        StatusSummaryServerText.Text = string.IsNullOrWhiteSpace(summary.Server)
+            ? BuildSelectedServerStatusLabel()
+            : $"状态对应：{summary.Server}";
+        StatusSummaryBody.Text = summary.Description;
+        StatusSummaryActionText.Text = summary.Action;
+        StatusSummaryActionText.Visibility = string.IsNullOrWhiteSpace(summary.Action)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
+    private string BuildSelectedServerStatusLabel()
+    {
+        var profile = _selectedProfile?.Profile;
+        return profile is null
+            ? "尚未选择服务器"
+            : $"状态对应：{profile.Name}（{profile.Ssh.User}@{profile.Ssh.Host}:{profile.Ssh.Port}）";
+    }
+
+    private void UpdateStateFromResult(string command, int exitCode, string output)
+    {
         var proxyReady = WorkflowOutputParser.IsProxyReady(command, output);
 
         ProxyDot.Fill = new SolidColorBrush(proxyReady
@@ -891,6 +1444,9 @@ public partial class MainWindow : Window
                                                 StringComparison.OrdinalIgnoreCase)
                                          || output.Contains(
                                                 "Application proxy: not ready",
+                                                StringComparison.OrdinalIgnoreCase)
+                                         || output.Contains(
+                                                "APPLICATION_NETWORK_CHECK_FAILED",
                                                 StringComparison.OrdinalIgnoreCase);
         var applicationNetworkDirect = output.Contains(
             "Application network: direct",
@@ -900,25 +1456,84 @@ public partial class MainWindow : Window
             StringComparison.OrdinalIgnoreCase);
         var applicationNetworkReady = applicationNetworkDirect || applicationNetworkProxy;
         var requiresApplicationNetwork = command is "start" or "repair" or "status";
-        var codexSignInRequired = output.Contains(
-            "Codex authentication: sign-in required",
+        var directUnreachable = output.Contains(
+            "APPLICATION_NETWORK_DIRECT_FAILED:",
+            StringComparison.OrdinalIgnoreCase);
+        var sshNotReady = IsSshNotReady(output);
+        var tunnelNotReady = IsTunnelNotReady(
+            output,
+            applicationNetworkDirect || directUnreachable);
+        var codexSignInRequired = IsCodexSignInRequired(output);
+        var staleCodexRoute = output.Contains(
+            "APPLICATION_NETWORK_PROCESS_MISMATCH:",
+            StringComparison.OrdinalIgnoreCase);
+        var bashrcInvalid = output.Contains(
+            "APPLICATION_NETWORK_BASHRC_INVALID",
+            StringComparison.OrdinalIgnoreCase);
+        var shellRouteInvalid = output.Contains(
+                                    "APPLICATION_NETWORK_SHELL_MISMATCH:",
+                                    StringComparison.OrdinalIgnoreCase)
+                                || output.Contains(
+                                    "APPLICATION_NETWORK_ROUTE_MISSING",
+                                    StringComparison.OrdinalIgnoreCase);
+        var proxyUnreachable = output.Contains(
+            "APPLICATION_NETWORK_PROXY_FAILED:",
+            StringComparison.OrdinalIgnoreCase);
+        var codexNotRunning = output.Contains(
+            "APPLICATION_NETWORK_CODEX_NOT_RUNNING:",
             StringComparison.OrdinalIgnoreCase);
 
         if (command == "stop")
         {
             SetState("已停止", StateKind.Idle);
         }
+        else if (sshNotReady)
+        {
+            SetState("SSH 连接不可用", StateKind.Error);
+        }
+        else if (tunnelNotReady)
+        {
+            SetState("代理隧道未连接", StateKind.Error);
+        }
+        else if (staleCodexRoute)
+        {
+            SetState("隧道正常 · 需重载 VS Code", StateKind.Warning);
+        }
+        else if (bashrcInvalid)
+        {
+            SetState("远端 Shell 配置损坏", StateKind.Error);
+        }
+        else if (shellRouteInvalid)
+        {
+            SetState("网络路线未生效", StateKind.Error);
+        }
+        else if (directUnreachable)
+        {
+            SetState("服务器直连已中断", StateKind.Error);
+        }
+        else if (proxyUnreachable)
+        {
+            SetState("Windows 代理路线不可用", StateKind.Error);
+        }
+        else if (codexNotRunning)
+        {
+            SetState("未检测到远程 Codex", StateKind.Warning);
+        }
+        else if (applicationNetworkNotReady)
+        {
+            SetState("应用网络未就绪", StateKind.Error);
+        }
+        else if (requiresApplicationNetwork && !applicationNetworkReady)
+        {
+            SetState("应用网络未就绪", StateKind.Error);
+        }
         else if (codexSignInRequired)
         {
             SetState("需要登录 Codex", StateKind.Error);
         }
-        else if (applicationNetworkNotReady)
+        else if (exitCode != 0)
         {
-            SetState("需要处理", StateKind.Error);
-        }
-        else if (requiresApplicationNetwork && !applicationNetworkReady)
-        {
-            SetState("需要处理", StateKind.Error);
+            SetState("修复未完成", StateKind.Error);
         }
         else if (applicationNetworkDirect)
         {
@@ -946,18 +1561,43 @@ public partial class MainWindow : Window
     private void SetState(string text, StateKind kind)
     {
         StatusText.Text = text;
+        StatusSummaryTitle.Text = text;
 
-        var colors = kind switch
+        var badgeColors = kind switch
         {
             StateKind.Connected => ("#DCFCE7", "#16A34A", "#166534"),
             StateKind.Working => ("#DBEAFE", "#2563EB", "#1D4ED8"),
+            StateKind.Warning => ("#FFEDD5", "#F97316", "#9A3412"),
             StateKind.Error => ("#FEE2E2", "#DC2626", "#991B1B"),
             _ => ("#F1F5F9", "#94A3B8", "#475569")
         };
 
-        StatusBadge.Background = (Brush)new BrushConverter().ConvertFromString(colors.Item1)!;
-        StatusDot.Fill = (Brush)new BrushConverter().ConvertFromString(colors.Item2)!;
-        StatusText.Foreground = (Brush)new BrushConverter().ConvertFromString(colors.Item3)!;
+        StatusBadge.Background = BrushFrom(badgeColors.Item1);
+        StatusDot.Fill = BrushFrom(badgeColors.Item2);
+        StatusText.Foreground = BrushFrom(badgeColors.Item3);
+
+        var cardColors = kind switch
+        {
+            StateKind.Connected => ("#F0FDF4", "#BBF7D0", "#16A34A", "#166534", "#DCFCE7", "✓"),
+            StateKind.Working => ("#EFF6FF", "#BFDBFE", "#2563EB", "#1D4ED8", "#DBEAFE", "…"),
+            StateKind.Warning => ("#FFF7ED", "#FED7AA", "#F97316", "#9A3412", "#FFEDD5", "!"),
+            StateKind.Error => ("#FEF2F2", "#FECACA", "#DC2626", "#991B1B", "#FEE2E2", "×"),
+            _ => ("#F8FAFC", "#E2E8F0", "#94A3B8", "#475569", "#F1F5F9", "•")
+        };
+
+        StatusSummaryCard.Background = BrushFrom(cardColors.Item1);
+        StatusSummaryCard.BorderBrush = BrushFrom(cardColors.Item2);
+        StatusSummaryAccent.Background = BrushFrom(cardColors.Item3);
+        StatusSummaryTitle.Foreground = BrushFrom(cardColors.Item4);
+        StatusSummaryIconBadge.Background = BrushFrom(cardColors.Item5);
+        StatusSummaryIcon.Foreground = BrushFrom(cardColors.Item3);
+        StatusSummaryIcon.Text = cardColors.Item6;
+        StatusSummaryActionText.Foreground = BrushFrom(cardColors.Item3);
+    }
+
+    private static Brush BrushFrom(string color)
+    {
+        return (Brush)new BrushConverter().ConvertFromString(color)!;
     }
 
     private void SetButtonsEnabled(bool enabled)
@@ -967,6 +1607,7 @@ public partial class MainWindow : Window
         var canInitialize = status == ProfileStatus.PasswordVerified;
         var canRun = isLegacy || status == ProfileStatus.Ready;
 
+        ProfileSelector.IsEnabled = enabled && _selectedProfile is not null;
         ConnectButton.IsEnabled = enabled && (canInitialize || canRun);
         ConnectButton.Content = canInitialize ? "完成 SSH 初始化" : "连接并打开 VS Code";
         StatusButton.IsEnabled = enabled && canRun;
@@ -1024,10 +1665,23 @@ public partial class MainWindow : Window
         Idle,
         Working,
         Connected,
+        Warning,
         Error
     }
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+
+    internal sealed record StatusSummaryContent(
+        string Server,
+        string Description,
+        string Action);
+
+    private sealed record WorkflowProfileContext(
+        Guid ProfileId,
+        string ProfileName,
+        string ConfigPath,
+        string Endpoint,
+        string SshAlias);
 
     private sealed record ProfileListItem(
         ConnectionProfile Profile,

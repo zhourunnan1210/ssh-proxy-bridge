@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('doctor', 'bootstrap-key', 'setup', 'start', 'repair', 'monitor', 'status', 'stop', 'uninstall')]
+    [ValidateSet('doctor', 'bootstrap-key', 'setup', 'start', 'repair', 'reload-vscode', 'monitor', 'status', 'stop', 'uninstall')]
     [string]$Command = 'doctor',
 
     [string]$Config,
@@ -465,13 +465,36 @@ function Get-SshOneShotArguments($Configuration, [switch]$UseAlias) {
 }
 
 function Test-SshLogin($Configuration, [switch]$Quiet) {
+    $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:unknown'
+    $script:LastSshLoginReason = 'unknown'
     $sshExe = Get-Executable 'ssh.exe'
     if (-not $sshExe) {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:ssh-command-missing'
+        $script:LastSshLoginReason = 'ssh-command-missing'
+        if (-not $Quiet) {
+            Write-Fail 'ssh.exe was not found.'
+        }
         return $false
     }
     if (-not (Test-PasswordGatewayMode $Configuration)) {
         $keyPath = Get-KeyPath $Configuration
-        if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
+        try {
+            $keyExists = Test-Path -LiteralPath $keyPath -PathType Leaf
+        }
+        catch {
+            $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:key-access-denied'
+            $script:LastSshLoginReason = 'key-access-denied'
+            if (-not $Quiet) {
+                Write-Fail 'The SSH private key cannot be read by the current Windows user.'
+            }
+            return $false
+        }
+        if (-not $keyExists) {
+            $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:key-missing'
+            $script:LastSshLoginReason = 'key-missing'
+            if (-not $Quiet) {
+                Write-Fail "The SSH private key does not exist: $keyPath"
+            }
             return $false
         }
     }
@@ -479,21 +502,90 @@ function Test-SshLogin($Configuration, [switch]$Quiet) {
     $arguments += @(Get-SshTargetArguments $Configuration)
     $arguments += 'printf SSH_PROXY_BRIDGE_LOGIN_OK'
     $environment = Get-SshProcessEnvironment $Configuration
-    $result = Invoke-NativeProcessWithTimeout $sshExe $arguments $null 20 $environment
+    try {
+        $result = Invoke-NativeProcessWithTimeout $sshExe $arguments $null 20 $environment
+    }
+    catch {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:check-failed'
+        $script:LastSshLoginReason = 'check-failed'
+        if (-not $Quiet) {
+            Write-Fail "SSH login check could not run: $($_.Exception.Message)"
+        }
+        return $false
+    }
     $ok = ($result.ExitCode -eq 0 -and ($result.Output -join '') -eq 'SSH_PROXY_BRIDGE_LOGIN_OK')
     $label = if (Test-PasswordGatewayMode $Configuration) { 'SSH password gateway login' } else { 'SSH key login' }
+    $detail = $result.Output -join ' '
+    if ($ok) {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_READY'
+        $script:LastSshLoginReason = 'ready'
+    }
+    elseif ($result.TimedOut -or $detail -match '(?i)connection timed out|operation timed out') {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:timeout'
+        $script:LastSshLoginReason = 'timeout'
+    }
+    elseif ($detail -match '(?i)REMOTE HOST IDENTIFICATION HAS CHANGED|host key verification failed') {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:host-key'
+        $script:LastSshLoginReason = 'host-key'
+    }
+    elseif ($detail -match '(?i)permission denied') {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:authentication-rejected'
+        $script:LastSshLoginReason = 'authentication-rejected'
+    }
+    elseif ($detail -match '(?i)connection refused') {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:connection-refused'
+        $script:LastSshLoginReason = 'connection-refused'
+    }
+    elseif ($detail -match '(?i)could not resolve hostname|name or service not known') {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:dns'
+        $script:LastSshLoginReason = 'dns'
+    }
+    else {
+        $script:LastSshLoginMarker = 'SSH_LOGIN_NOT_READY:connection-failed'
+        $script:LastSshLoginReason = 'connection-failed'
+    }
     if (-not $Quiet) {
         if ($ok) {
             Write-Pass "$label succeeded."
         }
-        elseif ($result.TimedOut) {
+        elseif ($script:LastSshLoginReason -eq 'timeout') {
             Write-Fail "$label timed out after 20 seconds. The server did not finish the SSH handshake."
+        }
+        elseif ($script:LastSshLoginReason -eq 'host-key') {
+            Write-Fail "$label was blocked because the saved server host key no longer matches."
+        }
+        elseif ($script:LastSshLoginReason -eq 'authentication-rejected') {
+            Write-Fail "$label was rejected by the server."
+        }
+        elseif ($script:LastSshLoginReason -eq 'connection-refused') {
+            Write-Fail "$label could not connect because the SSH port refused the connection."
+        }
+        elseif ($script:LastSshLoginReason -eq 'dns') {
+            Write-Fail "$label could not resolve the server address."
         }
         else {
             Write-Fail "$label is not ready."
         }
     }
     return $ok
+}
+
+function Write-SshLoginMarkers {
+    Write-Host "SSH login marker: $($script:LastSshLoginMarker)"
+    Write-Host "SSH login reason: $($script:LastSshLoginReason)"
+}
+
+function Assert-SshLoginReady($Configuration) {
+    if (Test-SshLogin $Configuration) {
+        Write-SshLoginMarkers
+        return
+    }
+
+    Write-SshLoginMarkers
+    Write-Host 'Connection diagnosis: ssh-not-ready'
+    Write-Host 'Application network marker: APPLICATION_NETWORK_SKIPPED:ssh-not-ready'
+    Write-Host 'Application network reason: ssh-not-ready'
+    throw 'SSH login is not ready. Check the server address, port, saved credential, and SSH initialization.'
 }
 
 function Ensure-SshKey($Configuration) {
@@ -1077,16 +1169,18 @@ function Test-RemoteDirectCodex($Configuration, [switch]$Quiet) {
 set -u
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
 target='https://chatgpt.com/backend-api/codex/responses'
-code=$(curl -sS -o /dev/null -w '%{http_code}' \
-    --noproxy '*' --connect-timeout 8 --max-time 15 \
-    -X POST -H 'content-type: application/json' --data '{}' \
-    "$target" 2>/dev/null || true)
-case "$code" in
-    400|401)
-        printf 'CODEX_DIRECT_OK:%s\n' "$code"
+code=''
+for attempt in 1 2; do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' \
+        --noproxy '*' --connect-timeout 6 --max-time 10 \
+        -X POST -H 'content-type: application/json' --data '{}' \
+        "$target" 2>/dev/null || true)
+    if [ "$code" = '401' ]; then
+        printf 'CODEX_DIRECT_OK:%s:attempt-%s\n' "$code" "$attempt"
         exit 0
-        ;;
-esac
+    fi
+    [ "$attempt" = '1' ] && sleep 1
+done
 printf 'CODEX_DIRECT_FAILED:%s\n' "${code:-none}"
 exit 1
 '@
@@ -1123,30 +1217,19 @@ function Test-RemoteProxy($Configuration) {
     $script = @'
 set -u
 proxy=$(printf %s __PROXY_BASE64__ | base64 -d)
-codex_code=$(curl -sS -o /dev/null -w '%{http_code}' \
-    --connect-timeout 8 --max-time 15 --proxy "$proxy" \
-    -X POST -H 'content-type: application/json' --data '{}' \
-    'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
-case "$codex_code" in
-    400|401)
-        printf 'CODEX_REMOTE_PROXY_OK:codex:%s\n' "$codex_code"
-        exit 0
-        ;;
-esac
-probe() {
-    name="$1"
-    target="$2"
-    expected="$3"
-    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 --proxy "$proxy" "$target" 2>/dev/null || true)
-    if [ "$code" = "$expected" ]; then
-        printf 'CODEX_REMOTE_PROXY_OK:%s:%s\n' "$name" "$code"
+codex_code=''
+for attempt in 1 2; do
+    codex_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 6 --max-time 10 --proxy "$proxy" \
+        -X POST -H 'content-type: application/json' --data '{}' \
+        'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
+    if [ "$codex_code" = '401' ]; then
+        printf 'CODEX_REMOTE_PROXY_OK:codex:%s:attempt-%s\n' "$codex_code" "$attempt"
         exit 0
     fi
-    printf 'PROBE_FAILED:%s:%s\n' "$name" "${code:-none}"
-}
-probe gstatic http://connectivitycheck.gstatic.com/generate_204 204
-probe microsoft http://www.msftconnecttest.com/connecttest.txt 200
-probe example http://example.com/ 200
+    [ "$attempt" = '1' ] && sleep 1
+done
+printf 'CODEX_REMOTE_PROXY_FAILED:codex:%s\n' "${codex_code:-none}"
 exit 1
 '@
     $script = $script.Replace('__PROXY_BASE64__', $urlBase64)
@@ -1162,12 +1245,18 @@ exit 1
     return $ok
 }
 
-function Test-RemoteApplicationNetwork($Configuration, [switch]$Quiet) {
+function Test-RemoteApplicationNetwork(
+    $Configuration,
+    [switch]$Quiet,
+    [switch]$RequireActiveCodex,
+    [switch]$SuppressMarkers
+) {
     $expected = "http://$($Configuration.ssh.remoteProxyHost):$($Configuration.ssh.remoteProxyPort)"
     $expectedBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expected))
     $script = @'
 set -u
 expected=$(printf %s __EXPECTED_BASE64__ | base64 -d)
+require_active=__REQUIRE_ACTIVE__
 if ! bash -n "$HOME/.bashrc" 2>/dev/null; then
     printf 'APPLICATION_NETWORK_BASHRC_INVALID\n'
     exit 1
@@ -1182,21 +1271,36 @@ case "$route" in
             exit 1
         fi
         unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
-        direct_code=$(curl -sS -o /dev/null -w '%{http_code}' \
-            --noproxy '*' --connect-timeout 8 --max-time 15 \
-            -X POST -H 'content-type: application/json' --data '{}' \
-            'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
-        case "$direct_code" in
-            400|401) ;;
-            *)
-                printf 'APPLICATION_NETWORK_DIRECT_FAILED:%s\n' "${direct_code:-none}"
-                exit 1
-                ;;
-        esac
+        direct_code=''
+        for attempt in 1 2; do
+            direct_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                --noproxy '*' --connect-timeout 6 --max-time 10 \
+                -X POST -H 'content-type: application/json' --data '{}' \
+                'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
+            [ "$direct_code" = '401' ] && break
+            [ "$attempt" = '1' ] && sleep 1
+        done
+        if [ "$direct_code" != '401' ]; then
+            printf 'APPLICATION_NETWORK_DIRECT_FAILED:%s\n' "${direct_code:-none}"
+            exit 1
+        fi
         ;;
     proxy)
         if [ "$shell_proxy" != "$expected" ]; then
             printf 'APPLICATION_NETWORK_SHELL_MISMATCH:proxy\n'
+            exit 1
+        fi
+        proxy_code=''
+        for attempt in 1 2; do
+            proxy_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                --connect-timeout 6 --max-time 10 --proxy "$expected" \
+                -X POST -H 'content-type: application/json' --data '{}' \
+                'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
+            [ "$proxy_code" = '401' ] && break
+            [ "$attempt" = '1' ] && sleep 1
+        done
+        if [ "$proxy_code" != '401' ]; then
+            printf 'APPLICATION_NETWORK_PROXY_FAILED:%s\n' "${proxy_code:-none}"
             exit 1
         fi
         ;;
@@ -1232,6 +1336,10 @@ for proc in /proc/[0-9]*; do
     esac
 done
 if [ "$total" -eq 0 ]; then
+    if [ "$require_active" = '1' ]; then
+        printf 'APPLICATION_NETWORK_CODEX_NOT_RUNNING:%s\n' "$route"
+        exit 1
+    fi
     printf 'APPLICATION_NETWORK_READY:%s:no-active-codex\n' "$route"
     exit 0
 fi
@@ -1242,6 +1350,7 @@ fi
 printf 'APPLICATION_NETWORK_READY:%s:%s/%s\n' "$route" "$ready" "$total"
 '@
     $script = $script.Replace('__EXPECTED_BASE64__', $expectedBase64)
+    $script = $script.Replace('__REQUIRE_ACTIVE__', $(if ($RequireActiveCodex) { '1' } else { '0' }))
     $scriptBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
     $command = "printf %s $scriptBase64 | base64 -d | bash"
@@ -1252,11 +1361,43 @@ printf 'APPLICATION_NETWORK_READY:%s:%s/%s\n' "$route" "$ready" "$total"
     $marker = if ($marker) { $marker.Trim() } else { '' }
     $ok = $result.ExitCode -eq 0 -and
         $marker -match '^APPLICATION_NETWORK_READY:(direct|proxy):'
+    $script:LastApplicationNetworkMarker = if ($marker) { $marker } else { 'APPLICATION_NETWORK_CHECK_FAILED' }
+    $script:LastApplicationNetworkReason = if ($marker -match '^APPLICATION_NETWORK_READY:') {
+        'ready'
+    }
+    elseif ($marker -match '^APPLICATION_NETWORK_PROCESS_MISMATCH:') {
+        'stale-codex-process'
+    }
+    elseif ($marker -match '^APPLICATION_NETWORK_CODEX_NOT_RUNNING:') {
+        'codex-not-running'
+    }
+    elseif ($marker -eq 'APPLICATION_NETWORK_BASHRC_INVALID') {
+        'bashrc-invalid'
+    }
+    elseif ($marker -match '^APPLICATION_NETWORK_SHELL_MISMATCH:') {
+        'shell-route-mismatch'
+    }
+    elseif ($marker -eq 'APPLICATION_NETWORK_ROUTE_MISSING') {
+        'shell-route-missing'
+    }
+    elseif ($marker -match '^APPLICATION_NETWORK_DIRECT_FAILED:') {
+        'direct-unreachable'
+    }
+    elseif ($marker -match '^APPLICATION_NETWORK_PROXY_FAILED:') {
+        'proxy-unreachable'
+    }
+    else {
+        'check-failed'
+    }
     $script:LastApplicationNetworkRoute = if ($ok) {
         ($marker -split ':')[1]
     }
     else {
         'not ready'
+    }
+    if (-not $SuppressMarkers) {
+        Write-Host "Application network marker: $($script:LastApplicationNetworkMarker)"
+        Write-Host "Application network reason: $($script:LastApplicationNetworkReason)"
     }
     if (-not $Quiet) {
         if ($ok) {
@@ -1279,11 +1420,61 @@ printf 'APPLICATION_NETWORK_READY:%s:%s/%s\n' "$route" "$ready" "$total"
         elseif ($marker -match '^APPLICATION_NETWORK_DIRECT_FAILED:') {
             Write-Fail 'The managed route is direct, but the server can no longer reach the Codex endpoint directly.'
         }
+        elseif ($marker -match '^APPLICATION_NETWORK_PROXY_FAILED:') {
+            Write-Fail "The managed proxy route cannot reach the Codex endpoint ($marker)."
+        }
         else {
             Write-Fail "Remote application network validation failed: $($result.Output -join ' ')"
         }
     }
     return $ok
+}
+
+function Restart-RemoteVsCodeServer($Configuration) {
+    if (-not $Force) {
+        throw 'Restarting the remote VS Code Server requires explicit confirmation.'
+    }
+    $script = @'
+set -u
+pids=''
+for proc in /proc/[0-9]*; do
+    [ -r "$proc/cmdline" ] || continue
+    command_line=$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)
+    case "$command_line" in
+        *"$HOME/.vscode-server/"*"/out/server-main.js"*|*"$HOME/.vscode-server/"*"/server/bin/code-server"*)
+            pids="$pids ${proc##*/}"
+            ;;
+    esac
+done
+if [ -z "${pids# }" ]; then
+    printf 'VSCODE_SERVER_RESTARTED:none-running\n'
+    exit 0
+fi
+kill -TERM $pids 2>/dev/null || true
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    alive=''
+    for pid in $pids; do
+        kill -0 "$pid" 2>/dev/null && alive="$alive $pid"
+    done
+    [ -z "${alive# }" ] && break
+    sleep 1
+done
+if [ -n "${alive# }" ]; then
+    kill -KILL $alive 2>/dev/null || true
+fi
+printf 'VSCODE_SERVER_RESTARTED:%s\n' "$(printf '%s' "$pids" | xargs)"
+'@
+    $scriptBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
+    $command = "printf %s $scriptBase64 | base64 -d | bash"
+    $result = Invoke-Ssh $Configuration $command -UseAlias
+    $marker = (($result.Output | Where-Object {
+                $_ -match '^VSCODE_SERVER_RESTARTED:'
+            } | Select-Object -First 1) -as [string])
+    if ($result.ExitCode -ne 0 -or -not $marker) {
+        throw "Remote VS Code Server restart failed: $($result.Output -join ' ')"
+    }
+    Write-Pass "Remote VS Code Server processes were stopped safely ($($marker.Trim()))."
 }
 
 function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet) {
@@ -1562,18 +1753,14 @@ try {
         }
         'setup' {
             Install-SshConfig $configuration
-            if (-not (Test-SshLogin $configuration)) {
-                throw 'Complete SSH initialization in SSH Proxy Bridge first.'
-            }
+            Assert-SshLoginReady $configuration
             $selectedRoute = Select-RemoteCodexRoute $configuration
             Install-RemoteProxyEnvironment $configuration $selectedRoute
             Write-Pass "Setup is complete. Selected application route: $selectedRoute."
         }
         'start' {
             Install-SshConfig $configuration
-            if (-not (Test-SshLogin $configuration)) {
-                throw 'Complete SSH initialization in SSH Proxy Bridge first.'
-            }
+            Assert-SshLoginReady $configuration
             $selectedRoute = Select-RemoteCodexRoute $configuration
             if ($selectedRoute -eq 'direct') {
                 Install-RemoteProxyEnvironment $configuration 'direct'
@@ -1594,13 +1781,22 @@ try {
             Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
             $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
+            if (-not $applicationNetworkOk) {
+                if ($script:LastApplicationNetworkReason -eq 'stale-codex-process') {
+                    Write-Host 'Start result: reload-vscode-required'
+                    Write-Warn 'The route is configured, but active Codex processes still use the previous route. Reload the remote VS Code session to apply it.'
+                    exit 2
+                }
+                Write-Host 'Start result: failed'
+                Write-Fail "The selected application route is not ready ($($script:LastApplicationNetworkReason))."
+                exit 1
+            }
+            Write-Host 'Start result: ready'
             Write-Pass "Codex remote network workflow started (route: $selectedRoute)."
         }
         'repair' {
             Install-SshConfig $configuration
-            if (-not (Test-SshLogin $configuration)) {
-                throw 'Complete SSH initialization in SSH Proxy Bridge first.'
-            }
+            Assert-SshLoginReady $configuration
             $selectedRoute = Select-RemoteCodexRoute $configuration
             if ($selectedRoute -eq 'direct') {
                 Install-RemoteProxyEnvironment $configuration 'direct'
@@ -1617,7 +1813,46 @@ try {
             Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
             $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
+            if (-not $applicationNetworkOk) {
+                if ($script:LastApplicationNetworkReason -eq 'stale-codex-process') {
+                    Write-Host 'Repair result: reload-vscode-required'
+                    Write-Warn 'The tunnel and route are ready, but active Codex processes still use the previous route. Reload the remote VS Code session to finish repair.'
+                    exit 2
+                }
+                Write-Host 'Repair result: failed'
+                Write-Fail "Application network repair did not complete ($($script:LastApplicationNetworkReason))."
+                exit 1
+            }
+            Write-Host 'Repair result: ready'
             Write-Pass "Application network route repaired (route: $selectedRoute)."
+        }
+        'reload-vscode' {
+            Install-SshConfig $configuration
+            Assert-SshLoginReady $configuration
+            Restart-RemoteVsCodeServer $configuration
+            Start-VsCode $configuration
+            Write-Host 'Reload result: waiting-for-codex'
+            $applicationNetworkOk = $false
+            for ($attempt = 1; $attempt -le 12; $attempt++) {
+                Start-Sleep -Seconds 5
+                $applicationNetworkOk = Test-RemoteApplicationNetwork `
+                    $configuration -Quiet -RequireActiveCodex -SuppressMarkers
+                if ($applicationNetworkOk) {
+                    break
+                }
+            }
+            Write-Host "Application network marker: $($script:LastApplicationNetworkMarker)"
+            Write-Host "Application network reason: $($script:LastApplicationNetworkReason)"
+            Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
+            $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
+            Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
+            if (-not $applicationNetworkOk) {
+                Write-Host 'Reload result: failed'
+                Write-Fail "VS Code reopened, but Codex did not adopt the selected route ($($script:LastApplicationNetworkReason))."
+                exit 1
+            }
+            Write-Host 'Reload result: ready'
+            Write-Pass "Remote VS Code reloaded and Codex adopted the $($script:LastApplicationNetworkRoute) route."
         }
         'monitor' {
             Invoke-TunnelMonitor $configuration
@@ -1626,15 +1861,41 @@ try {
             $proxyOk = Test-TcpPort ([string]$configuration.proxy.host) ([int]$configuration.proxy.port)
             $tunnel = Get-TunnelProcess $configuration
             $monitor = Get-MonitorProcess
-            $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
-            $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Proxy:  $(if ($proxyOk) { 'running' } else { 'not ready' })"
             Write-Host "Tunnel: $(if ($tunnel) { "running (PID $($tunnel.Id))" } else { 'stopped' })"
             Write-Host "Auto repair: $(if ($monitor) { "running (PID $($monitor.Id))" } else { 'stopped' })"
+
+            $loginLabel = if (Test-PasswordGatewayMode $configuration) { 'SSH password gateway login' } else { 'SSH key login' }
+            $sshLoginOk = $false
+            $sshLoginError = ''
+            try {
+                $sshLoginOk = Test-SshLogin $configuration -Quiet
+            }
+            catch {
+                $sshLoginError = $_.Exception.Message
+            }
+            Write-SshLoginMarkers
+            Write-Host "$loginLabel`: $(if ($sshLoginOk) { 'ready' } else { 'not ready' })"
+
+            if (-not $sshLoginOk) {
+                Write-Host 'Connection diagnosis: ssh-not-ready'
+                Write-Host 'Application network marker: APPLICATION_NETWORK_SKIPPED:ssh-not-ready'
+                Write-Host 'Application network reason: ssh-not-ready'
+                Write-Host 'Application network: unknown'
+                Write-Host 'Codex authentication: unknown'
+                if ($sshLoginError) {
+                    Write-Fail "SSH login check failed: $sshLoginError"
+                }
+                else {
+                    Write-Fail 'SSH login is not ready. Check the server address, port, saved credential, and SSH key initialization.'
+                }
+                exit 1
+            }
+
+            $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
+            $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
             Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
-            $loginLabel = if (Test-PasswordGatewayMode $configuration) { 'SSH password gateway login' } else { 'SSH key login' }
-            Write-Host "$loginLabel`: $(if (Test-SshLogin $configuration -Quiet) { 'ready' } else { 'not ready' })"
         }
         'stop' {
             Stop-Monitor

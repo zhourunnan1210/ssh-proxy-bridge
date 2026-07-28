@@ -31,7 +31,7 @@
   <text x="121" y="719" font-size="19" fill="#fff" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">127.0.0.1:7897</text>
 
   <text x="410" y="117" font-size="38" font-weight="700" fill="#14213d" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">我的服务器</text>
-  <text x="410" y="153" font-size="18" fill="#64748b" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">建立代理通道，并直接打开远程项目</text>
+  <text x="410" y="153" font-size="18" fill="#64748b" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">诊断网络路线，必要时建立代理隧道并打开远程项目</text>
   <rect x="1166" y="92" width="172" height="54" rx="14" fill="#edf3ff" stroke="#d9e4f5"/>
   <text x="1252" y="126" text-anchor="middle" font-size="18" font-weight="700" fill="#1e3a5f" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">＋ 添加服务器</text>
 
@@ -47,20 +47,26 @@
   <text x="472" y="387" font-size="17" fill="#7c8ca5" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">远程目录</text>
   <text x="580" y="388" font-size="20" font-weight="600" fill="#25324a" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">/workspace/my-project</text>
 
-  <rect x="708" y="440" width="126" height="48" rx="13" fill="#f6f8fb" stroke="#dce4ee"/>
-  <text x="771" y="470" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">运行诊断</text>
-  <rect x="849" y="440" width="126" height="48" rx="13" fill="#f6f8fb" stroke="#dce4ee"/>
-  <text x="912" y="470" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">刷新状态</text>
-  <rect x="990" y="440" width="126" height="48" rx="13" fill="#f6f8fb" stroke="#dce4ee"/>
-  <text x="1053" y="470" text-anchor="middle" font-size="17" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">停止连接</text>
-  <rect x="1131" y="440" width="163" height="48" rx="13" fill="#2f6fed"/>
-  <text x="1212" y="470" text-anchor="middle" font-size="17" font-weight="700" fill="#fff" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">打开 VS Code</text>
+  <rect x="592" y="440" width="110" height="48" rx="13" fill="#f6f8fb" stroke="#dce4ee"/>
+  <text x="647" y="470" text-anchor="middle" font-size="16" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">运行诊断</text>
+  <rect x="714" y="440" width="138" height="48" rx="13" fill="#f6f8fb" stroke="#dce4ee"/>
+  <text x="783" y="470" text-anchor="middle" font-size="16" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">一键修复连接</text>
+  <rect x="864" y="440" width="110" height="48" rx="13" fill="#f6f8fb" stroke="#dce4ee"/>
+  <text x="919" y="470" text-anchor="middle" font-size="16" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">刷新状态</text>
+  <rect x="986" y="440" width="110" height="48" rx="13" fill="#f6f8fb" stroke="#dce4ee"/>
+  <text x="1041" y="470" text-anchor="middle" font-size="16" fill="#475569" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">停止连接</text>
+  <rect x="1108" y="440" width="186" height="48" rx="13" fill="#2f6fed"/>
+  <text x="1201" y="470" text-anchor="middle" font-size="16" font-weight="700" fill="#fff" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">连接并打开 VS Code</text>
 
-  <text x="410" y="570" font-size="20" font-weight="700" fill="#14213d" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">运行信息</text>
+  <text x="410" y="570" font-size="20" font-weight="700" fill="#14213d" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">当前状态</text>
   <text x="1220" y="570" font-size="16" fill="#64748b" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">刚刚检查</text>
-  <rect x="410" y="594" width="928" height="118" rx="17" fill="#101a2d"/>
-  <circle cx="444" cy="628" r="6" fill="#22c55e"/>
-  <text x="463" y="635" font-size="17" fill="#dbeafe" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">本机代理正常，SSH 隧道正在运行。</text>
-  <circle cx="444" cy="670" r="6" fill="#22c55e"/>
-  <text x="463" y="677" font-size="17" fill="#dbeafe" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">服务器已通过 Windows 代理连接网络，可以开始远程开发。</text>
+  <rect x="410" y="594" width="928" height="118" rx="17" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="2"/>
+  <rect x="426" y="610" width="5" height="86" rx="2.5" fill="#16a34a"/>
+  <circle cx="462" cy="630" r="16" fill="#dcfce7"/>
+  <text x="462" y="637" text-anchor="middle" font-size="20" font-weight="700" fill="#16a34a" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">✓</text>
+  <text x="492" y="626" font-size="20" font-weight="700" fill="#166534" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">已连接 · Windows 代理</text>
+  <text x="492" y="651" font-size="15" fill="#64748b" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">状态对应：示例开发服务器（developer@203.0.113.10:22）</text>
+  <text x="492" y="677" font-size="16" fill="#334155" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">检查结果：连接正常。当前通过 SSH 隧道使用 Windows 本机代理。</text>
+  <text x="492" y="700" font-size="15" font-weight="700" fill="#16a34a" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">无需处理，可以继续使用远程 Codex。</text>
+  <text x="410" y="744" font-size="15" fill="#64748b" font-family="Microsoft YaHei UI,Segoe UI,sans-serif">▾ 查看技术详情（排查问题时使用）</text>
 </svg>

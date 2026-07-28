@@ -28,6 +28,7 @@ SSH Proxy Bridge 会：
 - 为服务器设置 Codex 等工具能够识别的直连或代理环境。
 - 直接用 VS Code 打开你指定的远程项目目录。
 - 在网络波动或 SSH 被重置后自动检查并重建受管隧道。
+- 用醒目的彩色状态卡直接说明“是否正常、当前是哪台服务器、下一步做什么”，技术详情默认折叠。
 - 保存多个服务器，下次只需选择服务器并点击连接。
 
 ## 三步开始使用
@@ -39,7 +40,7 @@ SSH Proxy Bridge 会：
 打开 [Releases](https://github.com/zhourunnan1210/ssh-proxy-bridge/releases/latest)，下载名称类似下面的文件：
 
 ```text
-SSH-Proxy-Bridge-v0.2.2-win-x64.zip
+SSH-Proxy-Bridge-v0.2.3-win-x64.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code`。下载完成后右键选择“全部解压”，不要直接在压缩包预览窗口里运行程序。
@@ -105,7 +106,9 @@ SSH-Proxy-Bridge-v0.2.2-win-x64.zip
 <details>
 <summary><strong>VS Code 已打开，但 Codex 仍然无法联网</strong></summary>
 
-先点击“刷新状态”。`Application network: direct` 表示服务器直连，`Application network: proxy` 表示使用 Windows 代理；如果显示 `not ready`，说明远端 Shell 或已经运行的 VS Code/Codex 进程没有继承选定路由。运行诊断会进一步检查服务器 `~/.bashrc` 语法和活动进程环境。代理路由下隧道失效时再点击“修复隧道”；修复不会重复打开 VS Code。
+先点击“刷新状态”。新版会直接用中文说明失败层级。若显示橙色“隧道正常 · 需重载 VS Code”，说明通道已经恢复，但运行中的 Codex 无法热更新网络环境；点击“一键修复连接”，保存工作后可在内嵌确认面板选择“重载并重新连接”。软件会重新打开远程目录并复验，只有 Codex 真正采用新路线后才显示绿色。
+
+每次检查结果都会在彩色“当前状态”卡片中标明对应服务器，并直接给出建议操作；底部英文进程输出已经收纳到默认折叠的“查看技术详情（排查问题时使用）”。切换服务器时，上一台服务器尚未返回的结果会被丢弃，当前服务器会自动重新检查，因此不会再把另一台服务器的 SSH 或登录状态显示到当前卡片。
 
 </details>
 

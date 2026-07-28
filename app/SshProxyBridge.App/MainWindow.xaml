@@ -77,7 +77,7 @@
                 <StackPanel>
                     <TextBlock Text="我的服务器" FontSize="26" FontWeight="SemiBold"
                                Foreground="{StaticResource TextPrimaryBrush}" />
-                    <TextBlock Text="建立代理隧道，并直接打开远程项目"
+                    <TextBlock Text="诊断网络路线，必要时建立代理隧道并打开远程项目"
                                Foreground="{StaticResource TextSecondaryBrush}" Margin="0,6,0,0" />
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -148,7 +148,7 @@
                         <Button x:Name="DiagnosticsButton" Content="运行诊断"
                                 Style="{StaticResource SecondaryButtonStyle}"
                                 Click="Diagnostics_Click" Margin="0,0,9,0" />
-                        <Button x:Name="RepairButton" Content="修复隧道"
+                        <Button x:Name="RepairButton" Content="一键修复连接"
                                 Style="{StaticResource SecondaryButtonStyle}"
                                 Click="Repair_Click" Margin="0,0,9,0" />
                         <Button x:Name="StatusButton" Content="刷新状态"
@@ -167,22 +167,73 @@
             <Grid Grid.Row="3">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="12" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
                 <Grid Margin="2,0,2,10">
-                    <TextBlock Text="运行信息" FontSize="14" FontWeight="SemiBold"
+                    <TextBlock Text="当前状态" FontSize="14" FontWeight="SemiBold"
                                Foreground="{StaticResource TextPrimaryBrush}" />
                     <TextBlock x:Name="LastCheckedText" Text=""
                                HorizontalAlignment="Right"
                                Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" />
                 </Grid>
-                <Border Grid.Row="1" Background="#101827" CornerRadius="12" Padding="16">
-                    <TextBox x:Name="LogTextBox" Text="界面已就绪。正在检查当前连接状态…"
-                             IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
-                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                             BorderThickness="0" Background="Transparent" Foreground="#D7E0EE"
-                             FontFamily="Microsoft YaHei UI, Microsoft YaHei" FontSize="12" />
+
+                <Border x:Name="StatusSummaryCard" Grid.Row="1"
+                        Background="#F8FAFC" BorderBrush="#CBD5E1" BorderThickness="1"
+                        CornerRadius="14" Padding="16"
+                        AutomationProperties.Name="当前服务器状态">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="4" />
+                            <ColumnDefinition Width="44" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border x:Name="StatusSummaryAccent"
+                                Width="4" CornerRadius="2" Background="#94A3B8"
+                                HorizontalAlignment="Left" VerticalAlignment="Stretch" />
+                        <Border x:Name="StatusSummaryIconBadge"
+                                Grid.Column="1"
+                                Width="36" Height="36" CornerRadius="18"
+                                Background="#F1F5F9"
+                                Margin="8,0,0,0"
+                                HorizontalAlignment="Left" VerticalAlignment="Top">
+                            <TextBlock x:Name="StatusSummaryIcon" Text="•"
+                                       Foreground="#64748B" FontSize="20" FontWeight="Bold"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="2" Margin="8,0,0,0">
+                            <TextBlock x:Name="StatusSummaryTitle" Text="等待检查"
+                                       Foreground="#334155" FontSize="16" FontWeight="SemiBold" />
+                            <TextBlock x:Name="StatusSummaryServerText" Text="尚未选择服务器"
+                                       Foreground="#64748B" FontSize="11"
+                                       TextWrapping="Wrap" Margin="0,4,0,0" />
+                            <TextBlock x:Name="StatusSummaryBody"
+                                       Text="软件会把诊断结论和建议操作显示在这里。"
+                                       Foreground="#334155" FontSize="12.5"
+                                       TextWrapping="Wrap" LineHeight="20" Margin="0,9,0,0" />
+                            <TextBlock x:Name="StatusSummaryActionText"
+                                       Text="等待检查完成。"
+                                       Foreground="#64748B" FontSize="12.5" FontWeight="SemiBold"
+                                       TextWrapping="Wrap" LineHeight="20" Margin="0,6,0,0" />
+                        </StackPanel>
+                    </Grid>
                 </Border>
+
+                <Expander x:Name="TechnicalDetailsExpander" Grid.Row="3"
+                          Header="查看技术详情（排查问题时使用）" IsExpanded="False"
+                          Foreground="{StaticResource TextSecondaryBrush}"
+                          FontSize="12" VerticalAlignment="Stretch">
+                    <Border Background="#101827" CornerRadius="12" Padding="16"
+                            Margin="0,8,0,0" MinHeight="150">
+                        <TextBox x:Name="LogTextBox" Text="界面已就绪。正在检查当前连接状态…"
+                                 IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                 BorderThickness="0" Background="Transparent" Foreground="#D7E0EE"
+                                 FontFamily="Microsoft YaHei UI, Microsoft YaHei" FontSize="12"
+                                 TextChanged="LogTextBox_TextChanged" />
+                    </Border>
+                </Expander>
             </Grid>
         </Grid>
 

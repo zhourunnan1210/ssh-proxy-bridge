@@ -1,0 +1,43 @@
+<UserControl x:Class="SshProxyBridge.App.RouteReloadPanel"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="600" Height="430"
+        Background="{StaticResource WindowBackgroundBrush}"
+        FontFamily="Microsoft YaHei UI, Microsoft YaHei">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Background="#172033" Padding="28,22">
+            <StackPanel>
+                <TextBlock Text="隧道已恢复，还需重载远程 VS Code"
+                           Foreground="White" FontSize="20" FontWeight="SemiBold" />
+                <TextBlock Text="SSH Proxy Bridge 检测到运行中的 Codex 仍使用旧网络路线"
+                           Foreground="#AFC0D8" FontSize="12" Margin="0,6,0,0" />
+            </StackPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" Margin="28,22" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <TextBlock x:Name="MessageText" TextWrapping="Wrap" LineHeight="23"
+                           Foreground="{StaticResource TextPrimaryBrush}" />
+                <Border Margin="0,18,0,0" Padding="14" CornerRadius="8"
+                        Background="#FFF7ED" BorderBrush="#FDBA74" BorderThickness="1">
+                    <TextBlock TextWrapping="Wrap" LineHeight="22" Foreground="#9A3412"
+                               Text="重载会让该服务器上的 VS Code Remote-SSH 窗口短暂断开，并可能关闭远程集成终端。请先保存编辑内容，确认没有依赖该终端前台运行的重要任务。普通独立服务器进程不会被主动终止。" />
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right"
+                    Margin="28,0,28,24">
+            <Button Content="暂不重载" Style="{StaticResource SecondaryButtonStyle}"
+                    Click="Cancel_Click" Margin="0,0,10,0" />
+            <Button Content="重载并重新连接" Style="{StaticResource PrimaryButtonStyle}"
+                    Click="Reload_Click" IsDefault="True" />
+        </StackPanel>
+    </Grid>
+</UserControl>
