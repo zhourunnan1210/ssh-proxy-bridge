@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using SshProxyBridge.App;
+using SshProxyBridge.Core.Models;
 using SshProxyBridge.Core.Security;
 
 namespace SshProxyBridge.App.Tests;
@@ -55,6 +56,143 @@ internal static class Program
             var overlay = Require<Border>(window, "OverlayBackdrop");
             var overlayContent = Require<ContentControl>(window, "OverlayContent");
             var mainContent = Require<Grid>(window, "MainContent");
+            var profileSelector = Require<ComboBox>(window, "ProfileSelector");
+            var statusSummaryCard = Require<Border>(window, "StatusSummaryCard");
+            var statusSummaryAccent = Require<Border>(window, "StatusSummaryAccent");
+            var statusSummaryTitle = Require<TextBlock>(window, "StatusSummaryTitle");
+            var statusSummaryServerText = Require<TextBlock>(window, "StatusSummaryServerText");
+            var statusSummaryBody = Require<TextBlock>(window, "StatusSummaryBody");
+            var statusSummaryActionText = Require<TextBlock>(window, "StatusSummaryActionText");
+            var technicalDetailsExpander = Require<Expander>(window, "TechnicalDetailsExpander");
+            var logTextBox = Require<TextBox>(window, "LogTextBox");
+
+            if (technicalDetailsExpander.IsExpanded)
+            {
+                throw new InvalidOperationException(
+                    "Technical diagnostics are expanded by default instead of prioritizing the status summary.");
+            }
+            Console.WriteLine("PASS  The prominent status card is present and technical details start collapsed.");
+
+            if (!MainWindow.ShouldAutoRefreshSelection(
+                    selectionStatusSuppressed: false,
+                    operationInProgress: false,
+                    hasConfigPath: true,
+                    isLegacy: false,
+                    status: ProfileStatus.Ready)
+                || MainWindow.ShouldAutoRefreshSelection(
+                    selectionStatusSuppressed: true,
+                    operationInProgress: false,
+                    hasConfigPath: true,
+                    isLegacy: false,
+                    status: ProfileStatus.Ready)
+                || MainWindow.ShouldAutoRefreshSelection(
+                    selectionStatusSuppressed: false,
+                    operationInProgress: true,
+                    hasConfigPath: true,
+                    isLegacy: false,
+                    status: ProfileStatus.Ready)
+                || MainWindow.ShouldAutoRefreshSelection(
+                    selectionStatusSuppressed: false,
+                    operationInProgress: false,
+                    hasConfigPath: true,
+                    isLegacy: false,
+                    status: ProfileStatus.Draft))
+            {
+                throw new InvalidOperationException(
+                    "Profile switching does not trigger exactly one safe status refresh.");
+            }
+
+            var operationProfileId = Guid.NewGuid();
+            var selectedProfileId = Guid.NewGuid();
+            if (!MainWindow.IsSameWorkflowProfile(
+                    operationProfileId,
+                    @"C:\profiles\one\runtime.json",
+                    operationProfileId,
+                    @"c:\profiles\one\runtime.json")
+                || MainWindow.IsSameWorkflowProfile(
+                    operationProfileId,
+                    @"C:\profiles\one\runtime.json",
+                    selectedProfileId,
+                    @"C:\profiles\two\runtime.json"))
+            {
+                throw new InvalidOperationException(
+                    "A completed workflow can still be applied to a different selected Profile.");
+            }
+
+            var scopedLog = MainWindow.BuildProfileScopedLog(
+                "server-one",
+                "root@192.0.2.10:22",
+                "codex-server-one",
+                "status details");
+            if (!scopedLog.StartsWith("结果对应服务器：server-one", StringComparison.Ordinal)
+                || !scopedLog.Contains("root@192.0.2.10:22", StringComparison.Ordinal)
+                || !scopedLog.Contains("status details", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Workflow output does not identify the server that produced it.");
+            }
+
+            const string healthyProfileLog =
+                "结果对应服务器：example-gpu（dev@192.0.2.20:22022 · SSH 别名 example-gpu）\n\n" +
+                "检查结果：连接正常。\n" +
+                "当前路线：服务器直连 Codex，不依赖 Windows 代理隧道。\n\n" +
+                "—— 技术详情 ——\n" +
+                "Proxy: running\n" +
+                "Tunnel: running (PID 10304)\n" +
+                "Application network marker: APPLICATION_NETWORK_READY:direct:2/2\n" +
+                "Codex authentication: ready";
+            logTextBox.Text = healthyProfileLog;
+
+            var highlightedSummary = string.Join(
+                "\n",
+                statusSummaryServerText.Text,
+                statusSummaryBody.Text,
+                statusSummaryActionText.Text);
+            if (!statusSummaryServerText.Text.Contains("example-gpu", StringComparison.Ordinal)
+                || !statusSummaryServerText.Text.Contains(
+                    "dev@192.0.2.20:22022",
+                    StringComparison.Ordinal)
+                || !statusSummaryBody.Text.Contains("连接正常", StringComparison.Ordinal)
+                || !statusSummaryBody.Text.Contains("服务器直连 Codex", StringComparison.Ordinal)
+                || !statusSummaryActionText.Text.Contains("无需处理", StringComparison.Ordinal)
+                || highlightedSummary.Contains("Proxy:", StringComparison.Ordinal)
+                || highlightedSummary.Contains("APPLICATION_NETWORK_", StringComparison.Ordinal)
+                || !logTextBox.Text.Contains("APPLICATION_NETWORK_READY", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The highlighted status summary is not server-bound, actionable, or separated from technical markers.");
+            }
+            Console.WriteLine(
+                "PASS  The highlighted Chinese summary stays bound to its server and hides internal markers.");
+
+            var setButtonsEnabled = typeof(MainWindow).GetMethod(
+                "SetButtonsEnabled",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Button-state updater was not found.");
+            profileSelector.IsEnabled = true;
+            setButtonsEnabled.Invoke(window, [false]);
+            if (profileSelector.IsEnabled)
+            {
+                throw new InvalidOperationException(
+                    "The server selector remains interactive while a workflow is running.");
+            }
+            var workflowRunner = typeof(MainWindow).GetMethod(
+                "RunPowerShellAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            if (workflowRunner is null
+                || workflowRunner.GetParameters() is not
+                    [
+                        { ParameterType: var commandParameter },
+                        { ParameterType: var configParameter }
+                    ]
+                || commandParameter != typeof(string)
+                || configParameter != typeof(string))
+            {
+                throw new InvalidOperationException(
+                    "The PowerShell workflow still reads its config from mutable UI selection state.");
+            }
+            Console.WriteLine(
+                "PASS  Workflow results stay bound to one server and Profile switching is race-safe.");
 
             var updateState = typeof(MainWindow).GetMethod(
                 "UpdateStateFromResult",
@@ -91,12 +229,41 @@ internal static class Program
                     0,
                     "Proxy: running\nTunnel: running\nAuto repair: running\nApplication network: not ready"
                 ]);
-            if (statusText.Text != "需要处理")
+            if (statusText.Text != "应用网络未就绪")
             {
                 throw new InvalidOperationException(
                     "A missing remote application proxy was incorrectly shown as connected.");
             }
             Console.WriteLine("PASS  Missing remote application network overrides the green tunnel state.");
+
+            const string staleRouteOutput =
+                "[PASS] The managed tunnel is healthy.\n" +
+                "Application network marker: APPLICATION_NETWORK_PROCESS_MISMATCH:proxy:0/2\n" +
+                "Application network reason: stale-codex-process\n" +
+                "Application network: not ready\n" +
+                "Repair result: reload-vscode-required";
+            updateState.Invoke(window, ["repair", 2, staleRouteOutput]);
+            if (statusText.Text != "隧道正常 · 需重载 VS Code")
+            {
+                throw new InvalidOperationException(
+                    "A stale Codex process route was not shown as a reload-required warning.");
+            }
+
+            var buildUserFacingLog = typeof(MainWindow).GetMethod(
+                "BuildUserFacingLog",
+                BindingFlags.Static | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("User-facing diagnosis formatter was not found.");
+            var staleSummary = (string?)buildUserFacingLog.Invoke(
+                null,
+                ["repair", staleRouteOutput]);
+            if (staleSummary is null
+                || !staleSummary.Contains("0/2", StringComparison.Ordinal)
+                || !staleSummary.Contains("重载并重新连接", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Stale-route diagnosis did not explain the affected process count and next action.");
+            }
+            Console.WriteLine("PASS  Stale Codex routes produce an actionable reload diagnosis.");
 
             updateState.Invoke(
                 window,
@@ -105,7 +272,7 @@ internal static class Program
                     0,
                     "Remote ~/.bashrc application network route installed: direct.\nCodex authentication: ready"
                 ]);
-            if (statusText.Text != "需要处理")
+            if (statusText.Text != "应用网络未就绪")
             {
                 throw new InvalidOperationException(
                     "Route selection text was incorrectly treated as application network validation.");
@@ -124,6 +291,16 @@ internal static class Program
                 throw new InvalidOperationException(
                     "A healthy server-direct route was not shown as connected.");
             }
+            if (!statusSummaryTitle.Text.Contains("服务器直连", StringComparison.Ordinal)
+                || statusSummaryCard.Background is not SolidColorBrush connectedCardBrush
+                || connectedCardBrush.Color.G < connectedCardBrush.Color.R
+                || statusSummaryAccent.Background is not SolidColorBrush connectedAccentBrush
+                || connectedAccentBrush.Color.G <= connectedAccentBrush.Color.R
+                || connectedAccentBrush.Color.G <= connectedAccentBrush.Color.B)
+            {
+                throw new InvalidOperationException(
+                    "A healthy server-direct route did not produce a prominent green status card.");
+            }
             Console.WriteLine("PASS  Server-direct mode does not require a local proxy or tunnel.");
 
             updateState.Invoke(
@@ -140,13 +317,158 @@ internal static class Program
             }
             Console.WriteLine("PASS  Missing Codex authentication is shown separately from network health.");
 
+            const string layeredSshFailureOutput =
+                "Proxy: running\n" +
+                "Tunnel: running (PID 123)\n" +
+                "Application network marker: APPLICATION_NETWORK_CHECK_FAILED\n" +
+                "Application network reason: check-failed\n" +
+                "Application network: not ready\n" +
+                "Codex authentication: sign-in-required\n" +
+                "SSH key login: not ready";
+            updateState.Invoke(window, ["status", 0, layeredSshFailureOutput]);
+            if (statusText.Text != "SSH 连接不可用")
+            {
+                throw new InvalidOperationException(
+                    "A downstream authentication failure incorrectly overrode the SSH failure.");
+            }
+            var layeredSshSummary = (string?)buildUserFacingLog.Invoke(
+                null,
+                ["status", layeredSshFailureOutput]);
+            if (layeredSshSummary is null
+                || !layeredSshSummary.StartsWith("诊断结论：服务器 SSH 登录不可用", StringComparison.Ordinal)
+                || layeredSshSummary.StartsWith("诊断结论：网络路线正常", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The user-facing log did not prioritize SSH over downstream checks.");
+            }
+            Console.WriteLine("PASS  SSH failure takes priority over network and authentication results.");
+
+            const string layeredTunnelFailureOutput =
+                "Proxy: running\n" +
+                "Tunnel: stopped\n" +
+                "Application network marker: APPLICATION_NETWORK_CHECK_FAILED\n" +
+                "Application network: not ready\n" +
+                "Codex authentication: sign-in required\n" +
+                "SSH key login: ready";
+            updateState.Invoke(window, ["status", 0, layeredTunnelFailureOutput]);
+            if (statusText.Text != "代理隧道未连接")
+            {
+                throw new InvalidOperationException(
+                    "An authentication result incorrectly overrode the tunnel failure.");
+            }
+            var layeredTunnelSummary = (string?)buildUserFacingLog.Invoke(
+                null,
+                ["status", layeredTunnelFailureOutput]);
+            if (layeredTunnelSummary is null
+                || !layeredTunnelSummary.StartsWith("诊断结论：SSH 可以登录", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The user-facing log did not prioritize the tunnel over downstream checks.");
+            }
+            Console.WriteLine("PASS  Tunnel failure takes priority over application and authentication results.");
+
+            const string layeredApplicationFailureOutput =
+                "Proxy: running\n" +
+                "Tunnel: running (PID 123)\n" +
+                "Application network marker: APPLICATION_NETWORK_CHECK_FAILED\n" +
+                "Application network reason: check-failed\n" +
+                "Application network: not ready\n" +
+                "Codex authentication: sign-in-required\n" +
+                "SSH key login: ready";
+            updateState.Invoke(window, ["status", 0, layeredApplicationFailureOutput]);
+            if (statusText.Text != "应用网络未就绪")
+            {
+                throw new InvalidOperationException(
+                    "An authentication result incorrectly overrode the application-network failure.");
+            }
+            var layeredApplicationSummary = (string?)buildUserFacingLog.Invoke(
+                null,
+                ["status", layeredApplicationFailureOutput]);
+            if (layeredApplicationSummary is null
+                || !layeredApplicationSummary.StartsWith(
+                    "诊断结论：SSH 和隧道已经通过基础检查",
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The user-facing log did not prioritize application network over authentication.");
+            }
+            Console.WriteLine("PASS  Application network failure takes priority over Codex authentication.");
+
+            const string proxyRouteFailureOutput =
+                "Proxy: running\n" +
+                "Tunnel: running (PID 123)\n" +
+                "Application network marker: APPLICATION_NETWORK_PROXY_FAILED:none\n" +
+                "Application network reason: proxy-unreachable\n" +
+                "Application network: not ready\n" +
+                "Codex authentication: sign-in-required\n" +
+                "SSH key login: ready";
+            updateState.Invoke(window, ["status", 0, proxyRouteFailureOutput]);
+            if (statusText.Text != "Windows 代理路线不可用")
+            {
+                throw new InvalidOperationException(
+                    "A Codex authentication result incorrectly overrode the failed proxy route.");
+            }
+            var proxyRouteFailureSummary = (string?)buildUserFacingLog.Invoke(
+                null,
+                ["status", proxyRouteFailureOutput]);
+            if (proxyRouteFailureSummary is null
+                || !proxyRouteFailureSummary.StartsWith(
+                    "诊断结论：SSH 可以登录，但服务器无法通过 Windows 代理路线",
+                    StringComparison.Ordinal)
+                || !proxyRouteFailureSummary.Contains("一键修复连接", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The failed proxy route did not produce an actionable diagnosis.");
+            }
+            Console.WriteLine("PASS  Failed Windows proxy route takes priority over Codex authentication.");
+
+            const string directRouteFailureOutput =
+                "Proxy: running\n" +
+                "Tunnel: stopped\n" +
+                "Application network marker: APPLICATION_NETWORK_DIRECT_FAILED:000\n" +
+                "Application network reason: direct-unreachable\n" +
+                "Application network: not ready\n" +
+                "Codex authentication: sign-in-required\n" +
+                "SSH key login: ready";
+            updateState.Invoke(window, ["status", 0, directRouteFailureOutput]);
+            if (statusText.Text != "服务器直连已中断")
+            {
+                throw new InvalidOperationException(
+                    "A failed direct route was incorrectly classified as a stopped tunnel.");
+            }
+            var directRouteFailureSummary = (string?)buildUserFacingLog.Invoke(
+                null,
+                ["status", directRouteFailureOutput]);
+            if (directRouteFailureSummary is null
+                || !directRouteFailureSummary.StartsWith(
+                    "诊断结论：服务器直连 Codex 已中断",
+                    StringComparison.Ordinal)
+                || !directRouteFailureSummary.Contains(
+                    "DNS 解析、TLS 握手或服务器出口线路",
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The direct-route failure did not preserve its application-network diagnosis.");
+            }
+            if (statusSummaryCard.Background is not SolidColorBrush errorCardBrush
+                || errorCardBrush.Color.R <= errorCardBrush.Color.G
+                || statusSummaryAccent.Background is not SolidColorBrush errorAccentBrush
+                || errorAccentBrush.Color.R <= errorAccentBrush.Color.G
+                || errorAccentBrush.Color.R <= errorAccentBrush.Color.B)
+            {
+                throw new InvalidOperationException(
+                    "A failed server route did not produce a prominent red status card.");
+            }
+            Console.WriteLine("PASS  Failed direct route is not misclassified as a tunnel failure.");
+
             var embeddedTypes = new[]
             {
                 typeof(AddServerPanel),
                 typeof(EditProfilePanel),
                 typeof(DeleteProfilePanel),
                 typeof(PasswordPromptPanel),
-                typeof(NoticePanel)
+                typeof(NoticePanel),
+                typeof(RouteReloadPanel)
             };
             if (embeddedTypes.Any(type => !typeof(UserControl).IsAssignableFrom(type)
                                           || typeof(Window).IsAssignableFrom(type)))

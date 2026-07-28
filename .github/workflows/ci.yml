@@ -49,6 +49,10 @@ jobs:
             exit 1
           }
 
+      - name: Check Codex endpoint probe policy
+        shell: pwsh
+        run: .\scripts\tests\test-codex-endpoint-policy.ps1
+
       - name: Build application
         shell: pwsh
         run: dotnet build .\app\SshProxyBridge.App\SshProxyBridge.App.csproj --configuration Release --no-restore --nologo
