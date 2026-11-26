@@ -53,6 +53,10 @@ jobs:
         shell: pwsh
         run: .\scripts\tests\test-codex-endpoint-policy.ps1
 
+      - name: Check remote Bash route detection
+        shell: pwsh
+        run: .\scripts\tests\test-remote-shell-route.ps1
+
       - name: Check managed tunnel identity
         shell: pwsh
         run: .\scripts\tests\test-managed-tunnel-process.ps1

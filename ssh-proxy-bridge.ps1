@@ -1262,9 +1262,13 @@ if ! bash -n "$HOME/.bashrc" 2>/dev/null; then
     printf 'APPLICATION_NETWORK_BASHRC_INVALID\n'
     exit 1
 fi
-shell_state=$(bash -ic 'printf "%s\n%s" "${SSH_PROXY_BRIDGE_ROUTE:-}" "${HTTPS_PROXY:-}"' 2>/dev/null || true)
-route=$(printf '%s\n' "$shell_state" | sed -n '1p')
-shell_proxy=$(printf '%s\n' "$shell_state" | sed -n '2p')
+# Read the marked result even when interactive startup writes to stdout.
+shell_output=$(env -u SSH_PROXY_BRIDGE_ROUTE -u HTTPS_PROXY \
+    bash -ic 'builtin printf "\n__SSH_PROXY_BRIDGE_SHELL_STATE__:%s:%s\n" "${SSH_PROXY_BRIDGE_ROUTE:-}" "${HTTPS_PROXY:-}"' \
+    </dev/null 2>/dev/null || true)
+shell_state=$(printf '%s\n' "$shell_output" | sed -n 's/^__SSH_PROXY_BRIDGE_SHELL_STATE__://p' | tail -n 1)
+route=${shell_state%%:*}
+shell_proxy=${shell_state#*:}
 case "$route" in
     direct)
         if [ -n "$shell_proxy" ]; then
