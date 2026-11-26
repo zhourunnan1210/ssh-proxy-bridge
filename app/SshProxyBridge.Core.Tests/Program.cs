@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using SshProxyBridge.Core.Diagnostics;
 using SshProxyBridge.Core.Models;
 using SshProxyBridge.Core.Profiles;
@@ -9,6 +10,7 @@ var tests = new List<(string Name, Func<Task> Run)>
     ("Profile validation accepts a valid draft", TestValidProfile),
     ("Profile validation rejects invalid fields", TestInvalidProfile),
     ("Profile store round-trips without secrets", TestProfileStoreRoundTrip),
+    ("Legacy server edits preserve SSH settings and list removal preserves the script config", TestLegacyProfileManagement),
     ("Credential target is stable and profile-scoped", TestCredentialTarget),
     ("Password gateway capabilities are classified without guessing", TestAuthenticationCapabilities),
     ("Legacy application data migration is additive and idempotent", TestLegacyDataMigration),
@@ -92,6 +94,78 @@ static async Task TestProfileStoreRoundTrip()
     {
         if (Directory.Exists(directory))
             Directory.Delete(directory, recursive: true);
+    }
+}
+
+static async Task TestLegacyProfileManagement()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"SshProxyBridge.LegacyTests.{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    var configPath = Path.Combine(directory, "config.local.json");
+    var appDataRoot = Path.Combine(directory, "app-data");
+    const string fixture = """
+        {
+          "proxy": { "host": "127.0.0.1", "port": 7897, "protocol": "socks5",
+                     "processName": "proxy-app", "executablePath": "C:\\Proxy\\代理.exe", "autoStart": false },
+          "ssh": { "alias": "legacy", "host": "192.0.2.10", "port": 22, "user": "fixture",
+                   "identityFile": "%USERPROFILE%\\.ssh\\fixture", "remoteProxyHost": "127.0.0.1",
+                   "remoteProxyPort": 17897, "userKnownHostsFile": "fixture-hosts" },
+          "vscode": { "launch": false, "remoteWorkspace": "/project", "extensionId": "test.extension" },
+          "extra": { "retained": ["value", 42] }
+        }
+        """;
+
+    try
+    {
+        var store = new LegacyProfileStore(appDataRoot);
+        await File.WriteAllTextAsync(configPath, fixture);
+        var profile = await store.LoadAsync(configPath)
+            ?? throw new InvalidOperationException("The existing script profile was not loaded.");
+        Assert(profile.Proxy.Protocol == ProxyProtocol.Socks5 && !profile.Proxy.AutoStart
+            && profile.Proxy.ExecutablePath == @"C:\Proxy\代理.exe", "Existing proxy values were lost.");
+        var id = profile.Id;
+
+        profile.Name = "测试服务器";
+        profile.Proxy.Host = "localhost";
+        profile.Proxy.Port = 7898;
+        profile.Proxy.Protocol = ProxyProtocol.Http;
+        profile.Proxy.ExecutablePath = null;
+        profile.Proxy.AutoStart = true;
+        profile.VsCode.DefaultWorkspace = "/新项目";
+        await store.SaveEditsAsync(configPath, profile);
+
+        var reopened = await store.LoadAsync(configPath)
+            ?? throw new InvalidOperationException("The edited script profile was not loaded.");
+        Assert(reopened.Id == id && reopened.Name == profile.Name
+            && reopened.Proxy.Host == profile.Proxy.Host && reopened.Proxy.Port == profile.Proxy.Port
+            && reopened.Proxy.Protocol == profile.Proxy.Protocol && reopened.Proxy.AutoStart
+            && reopened.Proxy.ExecutablePath == string.Empty
+            && reopened.VsCode.DefaultWorkspace == profile.VsCode.DefaultWorkspace,
+            "An edited setting did not survive reload.");
+
+        var original = JsonNode.Parse(fixture)!;
+        var updated = JsonNode.Parse(await File.ReadAllTextAsync(configPath))!;
+        Assert(JsonNode.DeepEquals(original["ssh"], updated["ssh"])
+            && JsonNode.DeepEquals(original["extra"], updated["extra"])
+            && JsonNode.DeepEquals(original["proxy"]!["processName"], updated["proxy"]!["processName"])
+            && JsonNode.DeepEquals(original["vscode"]!["extensionId"], updated["vscode"]!["extensionId"])
+            && JsonNode.DeepEquals(original["vscode"]!["launch"], updated["vscode"]!["launch"]),
+            "Unrelated script configuration changed after editing.");
+
+        var beforeRemoval = await File.ReadAllBytesAsync(configPath);
+        await store.RemoveFromListAsync(id);
+        Assert(await new LegacyProfileStore(appDataRoot).LoadAsync(configPath) is null,
+            "The legacy server reappeared after opening a new store.");
+        Assert(beforeRemoval.SequenceEqual(await File.ReadAllBytesAsync(configPath)),
+            "Removing the entry changed the script configuration.");
+
+        await File.WriteAllTextAsync(configPath, fixture.Replace("192.0.2.10", "192.0.2.11", StringComparison.Ordinal));
+        Assert(await store.LoadAsync(configPath) is { } differentProfile && differentProfile.Id != id,
+            "Removing one legacy server hid a different SSH endpoint with the same alias.");
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
     }
 }
 
@@ -183,28 +257,25 @@ static Task TestFingerprintNormalization()
 
 static Task TestProxyStatusParsing()
 {
-    Assert(WorkflowOutputParser.IsProxyReady("status", "Proxy:  running\nTunnel: running"),
+    Assert(WorkflowOutputParser.ParseProxyReadiness("Proxy:  running\nTunnel: running") == true,
         "Double-spaced running status was not recognized.");
-    Assert(WorkflowOutputParser.IsProxyReady("status", "Proxy:\trunning"),
+    Assert(WorkflowOutputParser.ParseProxyReadiness("Proxy:\trunning") == true,
         "Tab-separated running status was not recognized.");
-    Assert(!WorkflowOutputParser.IsProxyReady("status", "Proxy:  not ready"),
+    Assert(WorkflowOutputParser.ParseProxyReadiness("Proxy:  not ready\r\nTunnel: stopped") == false,
         "Not-ready proxy status was incorrectly accepted.");
-    Assert(WorkflowOutputParser.IsProxyReady(
-            "doctor",
-            "[PASS] HTTP proxy probe succeeded via Google connectivity check (status 204)."),
+    Assert(WorkflowOutputParser.ParseProxyReadiness(
+            "[PASS] HTTP proxy probe succeeded via Google connectivity check (status 204).") == true,
         "Successful diagnostic proxy probe was not recognized.");
-    Assert(WorkflowOutputParser.IsProxyReady(
-            "doctor",
-            "[PASS] HTTP proxy probe returned 204 via Google connectivity check."),
+    Assert(WorkflowOutputParser.ParseProxyReadiness(
+            "[PASS] HTTP proxy probe returned 204 via Google connectivity check.") == true,
         "Legacy-compatible diagnostic proxy marker was not recognized.");
-    Assert(!WorkflowOutputParser.IsProxyReady(
-            "doctor",
-            "[FAIL] HTTP proxy probe failed (Google connectivity check:status=502,exit=0)."),
+    Assert(WorkflowOutputParser.ParseProxyReadiness(
+            "[FAIL] HTTP proxy probe failed (Google connectivity check:status=502,exit=0).") is null,
         "Failed diagnostic proxy probe was incorrectly accepted.");
-    Assert(WorkflowOutputParser.IsProxyReady(
-            "repair",
-            "[PASS] Tunnel repair and automatic monitoring are ready."),
-        "A successful repair command did not preserve the local proxy indicator.");
+    Assert(WorkflowOutputParser.ParseProxyReadiness("Application network: direct") is null,
+        "The direct route was incorrectly treated as evidence of local proxy readiness.");
+    Assert(WorkflowOutputParser.ParseProxyReadiness("[PASS] Tunnel repair and automatic monitoring are ready.") is null,
+        "Unrelated repair output was incorrectly treated as evidence of local proxy readiness.");
     return Task.CompletedTask;
 }
 

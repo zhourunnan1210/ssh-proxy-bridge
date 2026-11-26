@@ -1,4 +1,5 @@
 config.local.json
+config.local.json.*.tmp
 .state/
 *.log
 app/**/bin/

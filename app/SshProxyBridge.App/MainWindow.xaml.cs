@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Sockets;
 using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,6 +20,7 @@ public partial class MainWindow : Window
     private readonly string? _toolRoot;
     private readonly string? _configPath;
     private readonly ProfileStore _profileStore = new();
+    private readonly LegacyProfileStore _legacyProfileStore = new();
     private readonly ProfileRuntimeWriter _runtimeWriter = new();
     private readonly ICredentialStore _credentialStore = new WindowsCredentialStore();
     private readonly ProfileCleanupService _cleanupService;
@@ -66,11 +66,13 @@ public partial class MainWindow : Window
     {
         var profiles = new List<ProfileListItem>();
 
-        if (_configPath is not null && File.Exists(_configPath))
+        if (_configPath is not null)
         {
             try
             {
-                profiles.Add(new ProfileListItem(ReadLegacyProfile(_configPath), true, _configPath));
+                var legacyProfile = await _legacyProfileStore.LoadAsync(_configPath);
+                if (legacyProfile is not null)
+                    profiles.Add(new ProfileListItem(legacyProfile, true, _configPath));
             }
             catch (Exception exception)
             {
@@ -109,9 +111,8 @@ public partial class MainWindow : Window
         try
         {
             ProfileSelector.ItemsSource = profiles;
-            var selected = selectProfileId.HasValue
-                ? profiles.FirstOrDefault(item => item.Profile.Id == selectProfileId.Value)
-                : profiles.FirstOrDefault(item => item.IsLegacy) ?? profiles.FirstOrDefault();
+            var selected = profiles.FirstOrDefault(item => item.Profile.Id == selectProfileId)
+                ?? profiles.FirstOrDefault();
 
             if (selected is not null)
             {
@@ -124,51 +125,13 @@ public partial class MainWindow : Window
                 WorkspaceText.Text = "—";
                 ProxySummaryText.Text = "等待配置";
                 SetState("没有服务器", StateKind.Idle);
-                SetButtonsEnabled(false);
+                SetButtonsEnabled(!_operationInProgress);
             }
         }
         finally
         {
             _suppressSelectionStatus = false;
         }
-    }
-
-    private static ConnectionProfile ReadLegacyProfile(string configPath)
-    {
-        using var document = JsonDocument.Parse(File.ReadAllText(configPath));
-        var root = document.RootElement;
-        var ssh = root.GetProperty("ssh");
-        var proxy = root.GetProperty("proxy");
-        var vscode = root.GetProperty("vscode");
-        var alias = GetString(ssh, "alias", "current-server");
-
-        return new ConnectionProfile
-        {
-            Id = CreateStableLegacyId(alias),
-            Name = GetString(root, "name", alias),
-            Status = ProfileStatus.Ready,
-            Proxy = new ProxyProfile
-            {
-                Host = GetString(proxy, "host", "127.0.0.1"),
-                Port = GetInt32(proxy, "port", 7897)
-            },
-            Ssh = new SshProfile
-            {
-                Alias = alias,
-                Host = GetString(ssh, "host", "unknown"),
-                Port = GetInt32(ssh, "port", 22),
-                User = GetString(ssh, "user", "user"),
-                IdentityFile = GetString(ssh, "identityFile", string.Empty)
-            },
-            Remote = new RemoteProfile
-            {
-                ProxyPort = GetInt32(ssh, "remoteProxyPort", 17897)
-            },
-            VsCode = new VsCodeProfile
-            {
-                DefaultWorkspace = GetString(vscode, "remoteWorkspace", "/")
-            }
-        };
     }
 
     private async void ProfileSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -320,28 +283,33 @@ public partial class MainWindow : Window
 
     private void EditProfile_Click(object sender, RoutedEventArgs e)
     {
-        if (_operationInProgress || _selectedProfile?.IsLegacy != false)
+        if (_operationInProgress || _selectedProfile is not { } item)
             return;
 
-        var profile = _selectedProfile.Profile;
-        var panel = new EditProfilePanel(profile);
+        var panel = new EditProfilePanel(item.Profile);
         panel.Completed += async values =>
         {
             CloseOverlay();
             if (values is not null)
-                await ApplyProfileEditsAsync(profile, values);
+                await ApplyProfileEditsAsync(item, values);
         };
         ShowOverlay(panel);
     }
 
     private async Task ApplyProfileEditsAsync(
-        ConnectionProfile profile,
+        ProfileListItem item,
         ProfileEditValues values)
     {
         _operationInProgress = true;
         SetButtonsEnabled(false);
         try
         {
+            var profile = item.IsLegacy
+                ? await _legacyProfileStore.LoadAsync(item.ConfigPath!)
+                : (await _profileStore.LoadAsync()).FirstOrDefault(profile => profile.Id == item.Profile.Id);
+            if (profile is null || profile.Id != item.Profile.Id)
+                throw new InvalidOperationException("该服务器配置已更改，请重新打开应用后再编辑。");
+
             profile.Name = values.Name;
             profile.Proxy.Host = values.ProxyHost;
             profile.Proxy.Port = values.ProxyPort;
@@ -350,9 +318,13 @@ public partial class MainWindow : Window
             profile.Proxy.AutoStart = values.ProxyAutoStart;
             profile.VsCode.DefaultWorkspace = values.DefaultWorkspace;
 
-            await _profileStore.UpsertAsync(profile);
+            if (item.IsLegacy)
+                await _legacyProfileStore.SaveEditsAsync(item.ConfigPath!, profile);
+            else
+                await _profileStore.UpsertAsync(profile);
+
             await LoadProfilesAsync(profile.Id);
-            SetState(profile.Status == ProfileStatus.Ready ? "设置已保存" : "密码已验证", StateKind.Idle);
+            SetState("设置已保存", StateKind.Idle);
             LogTextBox.Text =
                 "Profile 设置已保存。SSH 地址、账号、主机指纹和专用 Key 未改变。\n" +
                 "如果修改了代理设置，请停止该 Profile 的连接后重新连接。";
@@ -372,49 +344,43 @@ public partial class MainWindow : Window
 
     private void DeleteProfile_Click(object sender, RoutedEventArgs e)
     {
-        if (_operationInProgress || _selectedProfile?.IsLegacy != false)
+        if (_operationInProgress || _selectedProfile is not { } item)
             return;
 
-        var profile = _selectedProfile.Profile;
-        var panel = new DeleteProfilePanel(profile);
+        var panel = new DeleteProfilePanel(item.Profile, item.IsLegacy);
         panel.Completed += async request =>
         {
             CloseOverlay();
             if (request is not null)
-                await DeleteProfileAsync(profile, request);
+                await DeleteProfileAsync(item, request);
         };
         ShowOverlay(panel);
     }
 
     private async Task DeleteProfileAsync(
-        ConnectionProfile profile,
+        ProfileListItem item,
         DeleteProfileRequest request)
     {
-        var configPath = _selectedProfile?.ConfigPath
-                         ?? throw new InvalidOperationException(
-                             "待删除 Profile 缺少运行配置，无法执行安全清理。");
+        var profile = item.Profile;
         _operationInProgress = true;
         SetButtonsEnabled(false);
         try
         {
-            if (request.StopTunnel)
+            if (item.IsLegacy)
             {
-                SetState("正在停止 Profile 隧道", StateKind.Working);
-                LogTextBox.Text = "正在停止待删除 Profile 自己的受管隧道；不会停止“当前连接”的旧隧道…";
-                var stopResult = await RunPowerShellAsync("stop", configPath);
-                if (stopResult.ExitCode != 0)
-                {
-                    var detail = string.Join(Environment.NewLine,
-                        new[] { stopResult.StandardOutput, stopResult.StandardError }
-                            .Where(value => !string.IsNullOrWhiteSpace(value)));
-                    throw new InvalidOperationException(
-                        "未能安全停止该 Profile 的隧道，因此已取消删除。\n" + detail.Trim());
-                }
+                await _legacyProfileStore.RemoveFromListAsync(profile.Id);
+                await LoadProfilesAsync();
+                SetState("服务器已移出列表", StateKind.Idle);
+                LogTextBox.Text = $"“{profile.Name}”已移出服务器列表。脚本配置和现有连接仍可使用。";
+                return;
             }
 
+            if (request.StopTunnel)
+                await StopProfileBeforeDeletionAsync(item);
+
+            await _profileStore.DeleteAsync(profile.Id);
             SetState("正在清理本地数据", StateKind.Working);
             var cleanup = await _cleanupService.CleanupAsync(profile, request.CleanupOptions);
-            await _profileStore.DeleteAsync(profile.Id);
             await LoadProfilesAsync();
 
             SetState("Profile 已删除", cleanup.Warnings.Count == 0 ? StateKind.Idle : StateKind.Error);
@@ -443,6 +409,34 @@ public partial class MainWindow : Window
             _operationInProgress = false;
             SetButtonsEnabled(true);
         }
+    }
+
+    private async Task StopProfileBeforeDeletionAsync(ProfileListItem item)
+    {
+        var configPath = item.ConfigPath ?? _runtimeWriter.GetRuntimeConfigPath(item.Profile.Id);
+        if (_toolRoot is null || !File.Exists(configPath))
+        {
+            var stateDirectory = Path.Combine(Path.GetDirectoryName(configPath)!, "state");
+            if (File.Exists(Path.Combine(stateDirectory, "tunnel.pid"))
+                || File.Exists(Path.Combine(stateDirectory, "monitor.pid")))
+            {
+                throw new InvalidOperationException("该服务器有连接状态记录，缺少停止受管隧道所需的运行配置。");
+            }
+
+            return;
+        }
+
+        SetState("正在停止服务器隧道", StateKind.Working);
+        LogTextBox.Text = $"正在停止“{item.Profile.Name}”的受管隧道…";
+        var stopResult = await RunPowerShellAsync("stop", configPath);
+        if (stopResult.ExitCode == 0)
+            return;
+
+        var detail = string.Join(Environment.NewLine,
+            new[] { stopResult.StandardOutput, stopResult.StandardError }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+        throw new InvalidOperationException(
+            "未能安全停止该服务器的隧道，删除已取消。\n" + detail.Trim());
     }
 
     private void ShowServers_Click(object sender, RoutedEventArgs e) =>
@@ -504,6 +498,7 @@ public partial class MainWindow : Window
             RenderingBias = RenderingBias.Performance
         };
         MainContent.IsHitTestVisible = false;
+        MainContent.IsEnabled = false;
         OverlayContent.Content = content;
         OverlayBackdrop.Visibility = Visibility.Visible;
     }
@@ -514,6 +509,7 @@ public partial class MainWindow : Window
         OverlayContent.Content = null;
         MainContent.Effect = null;
         MainContent.IsHitTestVisible = true;
+        MainContent.IsEnabled = true;
     }
 
     private Task ShowNoticeAsync(string title, string message, bool compact = false)
@@ -978,6 +974,9 @@ public partial class MainWindow : Window
         }
         finally
         {
+            if ((command is "start" or "repair") && IsWorkflowProfileCurrent(operationContext))
+                await RefreshLocalProxyIndicatorAsync(operationProfile.Profile);
+
             _operationInProgress = false;
             SetButtonsEnabled(true);
         }
@@ -1429,11 +1428,12 @@ public partial class MainWindow : Window
 
     private void UpdateStateFromResult(string command, int exitCode, string output)
     {
-        var proxyReady = WorkflowOutputParser.IsProxyReady(command, output);
-
-        ProxyDot.Fill = new SolidColorBrush(proxyReady
-            ? Color.FromRgb(34, 197, 94)
-            : Color.FromRgb(148, 163, 184));
+        if (WorkflowOutputParser.ParseProxyReadiness(output) is bool proxyReady)
+        {
+            ProxyDot.Fill = new SolidColorBrush(proxyReady
+                ? Color.FromRgb(34, 197, 94)
+                : Color.FromRgb(148, 163, 184));
+        }
 
         var tunnelRunning = output.Contains("Tunnel: running", StringComparison.OrdinalIgnoreCase);
         var autoRepairRunning = output.Contains("Auto repair: running", StringComparison.OrdinalIgnoreCase)
@@ -1485,7 +1485,10 @@ public partial class MainWindow : Window
 
         if (command == "stop")
         {
-            SetState("已停止", StateKind.Idle);
+            if (exitCode == 0)
+                SetState("已停止", StateKind.Idle);
+            else
+                SetState("停止连接失败", StateKind.Error);
         }
         else if (sshNotReady)
         {
@@ -1614,7 +1617,8 @@ public partial class MainWindow : Window
         RepairButton.IsEnabled = enabled && canRun;
         StopButton.IsEnabled = enabled && canRun;
         DiagnosticsButton.IsEnabled = enabled && canRun;
-        var canManageProfile = _selectedProfile is not null && !isLegacy;
+        AddServerButton.IsEnabled = enabled;
+        var canManageProfile = _selectedProfile is not null;
         EditProfileButton.IsEnabled = enabled && canManageProfile;
         DeleteProfileButton.IsEnabled = enabled && canManageProfile;
     }
@@ -1637,27 +1641,6 @@ public partial class MainWindow : Window
         }
 
         return null;
-    }
-
-    private static string GetString(JsonElement element, string propertyName, string fallback)
-    {
-        return element.TryGetProperty(propertyName, out var value)
-            && value.ValueKind == JsonValueKind.String
-            ? value.GetString() ?? fallback
-            : fallback;
-    }
-
-    private static int GetInt32(JsonElement element, string propertyName, int fallback)
-    {
-        return element.TryGetProperty(propertyName, out var value) && value.TryGetInt32(out var result)
-            ? result
-            : fallback;
-    }
-
-    private static Guid CreateStableLegacyId(string alias)
-    {
-        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(alias));
-        return new Guid(bytes.AsSpan(0, 16));
     }
 
     private enum StateKind

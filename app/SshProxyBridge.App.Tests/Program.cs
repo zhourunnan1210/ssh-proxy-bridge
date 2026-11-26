@@ -207,6 +207,19 @@ internal static class Program
             Console.WriteLine("PASS  Double-spaced startup status keeps the local proxy indicator green.");
 
             var statusText = Require<TextBlock>(window, "StatusText");
+            updateState.Invoke(window, ["stop", 1, "[FAIL] Access is denied."]);
+            if (statusText.Text != "停止连接失败"
+                || proxyDot.Fill is not SolidColorBrush proxyAfterStopFailure
+                || proxyAfterStopFailure.Color != Color.FromRgb(34, 197, 94))
+            {
+                throw new InvalidOperationException(
+                    "A failed stop was shown as successful or reset the unrelated local proxy indicator.");
+            }
+            updateState.Invoke(window, ["stop", 0, "[PASS] Stopped SSH tunnel PID 123."]);
+            if (statusText.Text != "已停止")
+                throw new InvalidOperationException("A successful stop was not shown as stopped.");
+            Console.WriteLine("PASS  Stop displays the real operation result and preserves local proxy status.");
+
             updateState.Invoke(
                 window,
                 [
@@ -302,6 +315,13 @@ internal static class Program
                     "A healthy server-direct route did not produce a prominent green status card.");
             }
             Console.WriteLine("PASS  Server-direct mode does not require a local proxy or tunnel.");
+            updateState.Invoke(window, ["start", 0, "Application network: direct"]);
+            if (proxyDot.Fill is not SolidColorBrush directStartProxy
+                || directStartProxy.Color != Color.FromRgb(148, 163, 184))
+            {
+                throw new InvalidOperationException(
+                    "A successful direct connection was incorrectly treated as a ready local proxy.");
+            }
 
             updateState.Invoke(
                 window,
@@ -475,6 +495,51 @@ internal static class Program
             {
                 throw new InvalidOperationException("An interaction surface is still implemented as a Window.");
             }
+
+            var selectedProfile = typeof(MainWindow).GetField("_selectedProfile", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Profile selection was not found.");
+            var closeOverlay = typeof(MainWindow).GetMethod("CloseOverlay", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Overlay close action was not found.");
+            var editButton = Require<Button>(window, "EditProfileButton");
+            var deleteProfileButton = Require<Button>(window, "DeleteProfileButton");
+            foreach (var isLegacy in new[] { true, false })
+            {
+                var profile = new ConnectionProfile
+                {
+                    Name = "fixture",
+                    Status = isLegacy ? ProfileStatus.Ready : ProfileStatus.Draft
+                };
+                selectedProfile.SetValue(window, Activator.CreateInstance(selectedProfile.FieldType,
+                    profile, isLegacy, isLegacy ? @"C:\fixture\config.local.json" : null));
+                setButtonsEnabled.Invoke(window, [true]);
+                if (!editButton.IsEnabled || !deleteProfileButton.IsEnabled)
+                    throw new InvalidOperationException("A selected server cannot be edited or deleted.");
+
+                editButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                window.UpdateLayout();
+                if (overlayContent.Content is not EditProfilePanel editPanel || mainContent.IsEnabled
+                    || editPanel.ActualHeight > overlay.ActualHeight
+                    || Require<Button>(editPanel, "SaveButton").ActualHeight <= 0)
+                {
+                    throw new InvalidOperationException("The selected server's edit panel is missing or clipped.");
+                }
+                closeOverlay.Invoke(window, null);
+
+                deleteProfileButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                window.UpdateLayout();
+                if (overlayContent.Content is not DeleteProfilePanel deletePanel || deletePanel.StopTunnel
+                    || deletePanel.ActualHeight > overlay.ActualHeight
+                    || Require<Button>(deletePanel, "DeleteButton").ActualHeight <= 0
+                    || Require<StackPanel>(deletePanel, "CleanupOptionsPanel").Visibility
+                        != (isLegacy ? Visibility.Collapsed : Visibility.Visible))
+                {
+                    throw new InvalidOperationException("The server removal panel is missing, clipped, or requests an unexpected tunnel stop.");
+                }
+                closeOverlay.Invoke(window, null);
+            }
+            selectedProfile.SetValue(window, null);
+            setButtonsEnabled.Invoke(window, [true]);
+            Console.WriteLine("PASS  Legacy and draft servers can be edited and removed at minimum window size.");
 
             addServerButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             if (overlay.Visibility != Visibility.Visible

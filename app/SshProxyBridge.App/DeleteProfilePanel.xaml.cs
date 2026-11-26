@@ -7,9 +7,17 @@ namespace SshProxyBridge.App;
 
 public partial class DeleteProfilePanel : UserControl
 {
-    public DeleteProfilePanel(ConnectionProfile profile)
+    public DeleteProfilePanel(ConnectionProfile profile, bool isLegacy = false)
     {
         InitializeComponent();
+        if (isLegacy)
+        {
+            DescriptionText.Text = $"从列表中移除“{profile.Name}”({profile.Ssh.User}@{profile.Ssh.Host}:{profile.Ssh.Port})。脚本配置、SSH 凭据和正在运行的连接将保留。";
+            CleanupOptionsPanel.Visibility = Visibility.Collapsed;
+            ConfirmDeleteCheckBox.Content = "我确认将此服务器移出列表";
+            return;
+        }
+
         DescriptionText.Text =
             $"将删除“{profile.Name}”({profile.Ssh.User}@{profile.Ssh.Host}:{profile.Ssh.Port})。请选择需要同步清理的本地数据。";
 
@@ -17,7 +25,7 @@ public partial class DeleteProfilePanel : UserControl
         StopTunnelCheckBox.IsChecked = ready;
         StopTunnelCheckBox.IsEnabled = false;
         StopTunnelCheckBox.Content = ready
-            ? "删除前停止该 Profile 的受管隧道（安全要求）"
+            ? "删除前停止该服务器的受管隧道"
             : "该 Profile 尚未建立受管隧道";
         DeleteCredentialCheckBox.IsChecked = profile.Ssh.HasStoredCredential;
         DeleteCredentialCheckBox.IsEnabled = profile.Ssh.HasStoredCredential;

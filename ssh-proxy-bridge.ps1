@@ -821,17 +821,18 @@ function Test-ManagedTunnelProcess($Configuration, $Process) {
         return $false
     }
 
-    # When available, verify the exact reverse-forward and SSH alias. Some
-    # restricted Windows sessions cannot read Win32_Process.CommandLine, so
-    # process name/path remain the safe fallback for an app-owned PID file.
+    # Local proxy settings can be edited while this tunnel is running. Match
+    # the remote bind and SSH target, which stay the same until it is stopped.
     try {
         $details = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.Id)" -ErrorAction Stop
         if ($details) {
-            $remoteSpec = "$($Configuration.ssh.remoteProxyHost):$($Configuration.ssh.remoteProxyPort):$($Configuration.proxy.host):$($Configuration.proxy.port)"
-            $expectedAlias = [string]$Configuration.ssh.alias
+            $remoteBind = [regex]::Escape("$($Configuration.ssh.remoteProxyHost):$($Configuration.ssh.remoteProxyPort):")
+            $forwardArgument = '{0}[^\s"]+:\d+' -f $remoteBind
+            $target = [regex]::Escape([string]$Configuration.ssh.alias)
+            $forwardAndTarget = '(?:^|\s)-o\s+(?:"ExitOnForwardFailure=yes"|ExitOnForwardFailure=yes)\s+-R\s+(?:"{0}"|{0})\s+(?:"{1}"|{1})\s*$' -f $forwardArgument, $target
             return $details.Name -eq 'ssh.exe' -and
-                $details.CommandLine -match [regex]::Escape($remoteSpec) -and
-                $details.CommandLine -match [regex]::Escape($expectedAlias)
+                $details.CommandLine -cmatch '(?:^|\s)-N\s+-T(?:\s|$)' -and
+                $details.CommandLine -cmatch $forwardAndTarget
         }
     }
     catch {

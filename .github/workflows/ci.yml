@@ -53,6 +53,10 @@ jobs:
         shell: pwsh
         run: .\scripts\tests\test-codex-endpoint-policy.ps1
 
+      - name: Check managed tunnel identity
+        shell: pwsh
+        run: .\scripts\tests\test-managed-tunnel-process.ps1
+
       - name: Build application
         shell: pwsh
         run: dotnet build .\app\SshProxyBridge.App\SshProxyBridge.App.csproj --configuration Release --no-restore --nologo
