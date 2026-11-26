@@ -36,7 +36,8 @@ public partial class EditProfilePanel : UserControl
             errors.Add("代理地址不能为空。");
         if (!int.TryParse(ProxyPortBox.Text, out var proxyPort) || proxyPort is < 1 or > 65535)
             errors.Add("代理端口必须是 1 到 65535 之间的数字。");
-        if (string.IsNullOrWhiteSpace(WorkspaceBox.Text) || !WorkspaceBox.Text.Trim().StartsWith('/'))
+        var workspace = WorkspaceBox.Text.TrimStart();
+        if (!workspace.StartsWith('/') || workspace.Any(char.IsControl))
             errors.Add("默认远程目录必须是以 / 开头的绝对路径。");
 
         if (errors.Count > 0)
@@ -54,7 +55,7 @@ public partial class EditProfilePanel : UserControl
             Enum.Parse<ProxyProtocol>(protocolName),
             string.IsNullOrWhiteSpace(ProxyExecutableBox.Text) ? null : ProxyExecutableBox.Text.Trim(),
             ProxyAutoStartCheckBox.IsChecked == true,
-            WorkspaceBox.Text.Trim());
+            workspace);
         Completed?.Invoke(values);
     }
 

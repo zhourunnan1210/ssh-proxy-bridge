@@ -5,9 +5,11 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using SshProxyBridge.App;
 using SshProxyBridge.Core.Models;
 using SshProxyBridge.Core.Security;
+using SshProxyBridge.Core.Ssh;
 
 namespace SshProxyBridge.App.Tests;
 
@@ -484,6 +486,7 @@ internal static class Program
             var embeddedTypes = new[]
             {
                 typeof(AddServerPanel),
+                typeof(RemoteWorkspacePanel),
                 typeof(EditProfilePanel),
                 typeof(DeleteProfilePanel),
                 typeof(PasswordPromptPanel),
@@ -573,6 +576,89 @@ internal static class Program
                     $"bar={actionBar.ActualHeight}, cancel={cancelButton.ActualHeight}, " +
                     $"next={nextButton.ActualHeight}.");
             }
+
+            var commandMode = Require<RadioButton>(addPanel, "CommandLoginModeButton");
+            var manualMode = Require<RadioButton>(addPanel, "ManualLoginModeButton");
+            var manualFields = Require<Grid>(addPanel, "ManualLoginPanel");
+            var commandFields = Require<StackPanel>(addPanel, "CommandLoginPanel");
+            if (manualMode.IsChecked != true || manualFields.Visibility != Visibility.Visible
+                || commandFields.Visibility != Visibility.Collapsed)
+            {
+                throw new InvalidOperationException("The add form did not open in manual login mode.");
+            }
+
+            commandMode.IsChecked = true;
+            if (manualFields.Visibility != Visibility.Collapsed || commandFields.Visibility != Visibility.Visible)
+                throw new InvalidOperationException("The login mode switch did not show the command form.");
+            manualMode.IsChecked = true;
+            if (manualFields.Visibility != Visibility.Visible || commandFields.Visibility != Visibility.Collapsed)
+                throw new InvalidOperationException("The login mode switch did not return to manual entry.");
+            commandMode.IsChecked = true;
+
+            const string fixturePassword = "%fixture+:!";
+            var commandBox = Require<TextBox>(addPanel, "SshCommandBox");
+            var passwordBox = Require<PasswordBox>(addPanel, "SshPasswordBox");
+            var clipboard = new DataObject(DataFormats.UnicodeText,
+                $"登录指令：ssh -p 2222 dev@server.example\r\n密码：{fixturePassword}");
+            var paste = new DataObjectPastingEventArgs(clipboard, isDragDrop: false, DataFormats.UnicodeText);
+            commandBox.RaiseEvent(paste);
+            if (!paste.CommandCancelled || commandBox.Text != "ssh -p 2222 dev@server.example"
+                || passwordBox.Password != fixturePassword)
+            {
+                throw new InvalidOperationException("The pasted login did not keep the password in the masked field only.");
+            }
+
+            Require<TextBox>(addPanel, "ServerNameBox").Text = "fixture";
+            nextButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            nextButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            var review = Require<TextBlock>(addPanel, "ReviewText").Text;
+            if (!review.Contains("dev@server.example:2222", StringComparison.Ordinal)
+                || review.Contains(fixturePassword, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("The review did not use the parsed SSH endpoint safely.");
+            }
+            Console.WriteLine("PASS  Login mode switching and composite paste feed the shared wizard without exposing the password.");
+
+            string? chosenPath = null;
+            const string remoteFolder = "/home/dev/中文 project.v1";
+            var pickerOverlay = Require<Border>(addPanel, "WorkspacePickerOverlay");
+            var pickerHost = Require<ContentControl>(addPanel, "WorkspacePickerContent");
+            var workspacePicker = new RemoteWorkspacePanel((path, _) => Task.FromResult(path == "."
+                ? new RemoteDirectoryListing("/home/dev", ["中文 project.v1"])
+                : new RemoteDirectoryListing(path, [])));
+            workspacePicker.Completed += path => chosenPath = path;
+            pickerHost.Content = workspacePicker;
+            pickerOverlay.Visibility = Visibility.Visible;
+            window.UpdateLayout();
+            window.Dispatcher.Invoke(() => { }, DispatcherPriority.Loaded);
+            var pathBox = Require<TextBox>(workspacePicker, "PathBox");
+            if (pathBox.Text != "/home/dev" || Require<ListBox>(workspacePicker, "DirectoryList").Items.Count != 1
+                || Math.Abs(workspacePicker.ActualWidth - addPanel.ActualWidth) > 0.5)
+                throw new InvalidOperationException("The folder picker did not load the remote home directory.");
+
+            pathBox.Text = remoteFolder;
+            Require<Button>(workspacePicker, "GoButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (pathBox.Text != remoteFolder || Require<ListBox>(workspacePicker, "DirectoryList").Items.Count != 0)
+                throw new InvalidOperationException("The folder picker could not navigate to a Unicode directory with spaces.");
+
+            Require<Button>(workspacePicker, "ChooseFolderButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (chosenPath != remoteFolder)
+                throw new InvalidOperationException("The selected remote workspace was not returned intact.");
+
+            chosenPath = null;
+            var manualPicker = new RemoteWorkspacePanel((_, _) => Task.FromException<RemoteDirectoryListing>(
+                new InvalidOperationException("Fixture with no SFTP subsystem.")));
+            manualPicker.Completed += path => chosenPath = path;
+            pickerHost.Content = manualPicker;
+            window.UpdateLayout();
+            window.Dispatcher.Invoke(() => { }, DispatcherPriority.Loaded);
+            Require<TextBox>(manualPicker, "PathBox").Text = remoteFolder;
+            Require<Button>(manualPicker, "ChooseFolderButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            if (chosenPath != remoteFolder)
+                throw new InvalidOperationException("A server without SFTP did not allow manual directory entry.");
+            pickerHost.Content = null;
+            pickerOverlay.Visibility = Visibility.Collapsed;
+            Console.WriteLine("PASS  The remote folder picker browses directories and accepts a manual path when SFTP is unavailable.");
 
             cancelButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             if (overlay.Visibility != Visibility.Collapsed

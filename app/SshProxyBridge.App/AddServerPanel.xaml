@@ -6,28 +6,63 @@
         FontFamily="Microsoft YaHei UI, Microsoft YaHei">
     <UserControl.Resources>
         <Style TargetType="TextBox">
-            <Setter Property="Height" Value="40" />
-            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="Height" Value="36" />
+            <Setter Property="Padding" Value="10,6" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Background" Value="White" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
         </Style>
         <Style TargetType="ComboBox">
-            <Setter Property="Height" Value="40" />
+            <Setter Property="Height" Value="36" />
             <Setter Property="Padding" Value="8,4" />
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
         </Style>
         <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
             <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Margin" Value="0,0,0,7" />
+            <Setter Property="Margin" Value="0,0,0,5" />
         </Style>
         <Style x:Key="StepCircleStyle" TargetType="Border">
-            <Setter Property="Width" Value="30" />
-            <Setter Property="Height" Value="30" />
-            <Setter Property="CornerRadius" Value="15" />
+            <Setter Property="Width" Value="28" />
+            <Setter Property="Height" Value="28" />
+            <Setter Property="CornerRadius" Value="14" />
             <Setter Property="Background" Value="#E2E8F0" />
+        </Style>
+        <Style x:Key="LoginModeButtonStyle" TargetType="RadioButton">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="12,4" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="Segment" Background="{TemplateBinding Background}"
+                                BorderBrush="Transparent" BorderThickness="1" CornerRadius="5"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Segment" Property="Background" Value="#E8EEF7" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Segment" Property="Background" Value="White" />
+                                <Setter TargetName="Segment" Property="BorderBrush" Value="#C9D8EC" />
+                                <Setter Property="Foreground" Value="{StaticResource AccentHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Segment" Property="BorderBrush"
+                                        Value="{StaticResource AccentBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Segment" Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </UserControl.Resources>
 
@@ -39,16 +74,16 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Background="#172033" Padding="28,23">
+        <Border Grid.Row="0" Background="#172033" Padding="28,15">
             <StackPanel>
-                <TextBlock Text="添加一台远程服务器" Foreground="White"
+                <TextBlock Text="添加服务器" Foreground="White"
                            FontSize="22" FontWeight="SemiBold" />
-                <TextBlock Text="验证 SSH 主机和密码；成功后才会按你的选择保存凭据。"
-                           Foreground="#AFC0D8" Margin="0,7,0,0" />
+                <TextBlock Text="填写连接信息并验证 SSH 登录" Foreground="#AFC0D8"
+                           Margin="0,4,0,0" />
             </StackPanel>
         </Border>
 
-        <Grid Grid.Row="1" Margin="34,22,34,10">
+        <Grid Grid.Row="1" Margin="32,14,32,4">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
@@ -63,7 +98,7 @@
                 </Border>
                 <TextBlock Text="服务器" Margin="8,6,0,0" FontWeight="SemiBold" />
             </StackPanel>
-            <Border Grid.Column="1" Height="2" Background="#CBD5E1" Margin="14,15" />
+            <Border Grid.Column="1" Height="2" Background="#CBD5E1" Margin="14,0" />
             <StackPanel Grid.Column="2" Orientation="Horizontal">
                 <Border x:Name="Step2Circle" Style="{StaticResource StepCircleStyle}">
                     <TextBlock Text="2" HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -71,17 +106,17 @@
                 </Border>
                 <TextBlock Text="本机代理" Margin="8,6,0,0" FontWeight="SemiBold" />
             </StackPanel>
-            <Border Grid.Column="3" Height="2" Background="#CBD5E1" Margin="14,15" />
+            <Border Grid.Column="3" Height="2" Background="#CBD5E1" Margin="14,0" />
             <StackPanel Grid.Column="4" Orientation="Horizontal">
                 <Border x:Name="Step3Circle" Style="{StaticResource StepCircleStyle}">
                     <TextBlock Text="3" HorizontalAlignment="Center" VerticalAlignment="Center"
                                FontWeight="Bold" />
                 </Border>
-                <TextBlock Text="项目与确认" Margin="8,6,0,0" FontWeight="SemiBold" />
+                <TextBlock Text="SSH 验证" Margin="8,6,0,0" FontWeight="SemiBold" />
             </StackPanel>
         </Grid>
 
-        <Border Grid.Row="2" Margin="28,10,28,12" Padding="28,23"
+        <Border Grid.Row="2" Margin="28,8,28,12" Padding="24,15"
                 Background="White" BorderBrush="{StaticResource BorderBrush}"
                 BorderThickness="1" CornerRadius="14">
             <Grid>
@@ -89,55 +124,98 @@
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
-                <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto"
+                <ScrollViewer x:Name="FormScrollViewer" Grid.Row="0" VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled">
                     <Grid>
                         <StackPanel x:Name="Step1Panel">
-                            <TextBlock Text="SSH 服务器" FontSize="18" FontWeight="SemiBold"
-                                       Foreground="{StaticResource TextPrimaryBrush}" />
-                            <TextBlock Text="填写服务器的公开连接信息。这里不会修改当前正在使用的连接。"
-                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,5,0,20" />
-
-                            <TextBlock Text="服务器名称" Style="{StaticResource FieldLabelStyle}" />
-                            <TextBox x:Name="ServerNameBox" Margin="0,0,0,16" />
-
-                            <Grid Margin="0,0,0,16">
+                            <Grid Margin="0,0,0,13">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="16" />
-                                    <ColumnDefinition Width="130" />
+                                    <ColumnDefinition Width="5*" />
+                                    <ColumnDefinition Width="14" />
+                                    <ColumnDefinition Width="6*" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Text="SSH 地址" Style="{StaticResource FieldLabelStyle}" />
-                                    <TextBox x:Name="SshHostBox" />
+                                    <TextBlock x:Name="ServerNameLabel" Text="服务器名称"
+                                               Style="{StaticResource FieldLabelStyle}" />
+                                    <TextBox x:Name="ServerNameBox"
+                                             AutomationProperties.LabeledBy="{Binding ElementName=ServerNameLabel}" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="2">
-                                    <TextBlock Text="端口" Style="{StaticResource FieldLabelStyle}" />
-                                    <TextBox x:Name="SshPortBox" Text="22" />
+                                    <TextBlock Text="SSH 登录方式" Style="{StaticResource FieldLabelStyle}" />
+                                    <Border Height="36" Background="#EEF2F7" Padding="3"
+                                            BorderBrush="{StaticResource BorderBrush}"
+                                            BorderThickness="1" CornerRadius="8">
+                                        <UniformGrid Columns="2">
+                                            <RadioButton x:Name="CommandLoginModeButton" Content="指令登录"
+                                                         GroupName="SshLoginMode" Checked="LoginMode_Checked"
+                                                         Style="{StaticResource LoginModeButtonStyle}" />
+                                            <RadioButton x:Name="ManualLoginModeButton" Content="输入登录"
+                                                         GroupName="SshLoginMode" IsChecked="True"
+                                                         Checked="LoginMode_Checked"
+                                                         Style="{StaticResource LoginModeButtonStyle}" />
+                                        </UniformGrid>
+                                    </Border>
                                 </StackPanel>
                             </Grid>
 
-                            <TextBlock Text="SSH 用户" Style="{StaticResource FieldLabelStyle}" />
-                            <TextBox x:Name="SshUserBox" Margin="0,0,0,16" />
+                            <Grid x:Name="ManualLoginPanel" Margin="0,0,0,13">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="3*" />
+                                    <ColumnDefinition Width="12" />
+                                    <ColumnDefinition Width="88" />
+                                    <ColumnDefinition Width="12" />
+                                    <ColumnDefinition Width="2*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock x:Name="SshHostLabel" Text="SSH 地址"
+                                               Style="{StaticResource FieldLabelStyle}" />
+                                    <TextBox x:Name="SshHostBox"
+                                             AutomationProperties.LabeledBy="{Binding ElementName=SshHostLabel}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock x:Name="SshPortLabel" Text="端口"
+                                               Style="{StaticResource FieldLabelStyle}" />
+                                    <TextBox x:Name="SshPortBox" Text="22"
+                                             AutomationProperties.LabeledBy="{Binding ElementName=SshPortLabel}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="4">
+                                    <TextBlock x:Name="SshUserLabel" Text="SSH 用户"
+                                               Style="{StaticResource FieldLabelStyle}" />
+                                    <TextBox x:Name="SshUserBox"
+                                             AutomationProperties.LabeledBy="{Binding ElementName=SshUserLabel}" />
+                                </StackPanel>
+                            </Grid>
 
-                            <TextBlock Text="服务器密码" Style="{StaticResource FieldLabelStyle}" />
-                            <PasswordBox x:Name="SshPasswordBox" Height="40" Padding="10,7"
+                            <StackPanel x:Name="CommandLoginPanel" Visibility="Collapsed" Margin="0,0,0,13">
+                                <TextBlock x:Name="SshCommandLabel" Text="SSH 登录指令"
+                                           Style="{StaticResource FieldLabelStyle}" />
+                                <TextBox x:Name="SshCommandBox" Height="54" AcceptsReturn="True"
+                                         TextWrapping="Wrap" VerticalContentAlignment="Top"
+                                         VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Mono, Consolas"
+                                         AutomationProperties.LabeledBy="{Binding ElementName=SshCommandLabel}" />
+                                <TextBlock TextWrapping="Wrap" Margin="0,5,0,0"
+                                           Foreground="{StaticResource TextSecondaryBrush}">
+                                    <Run Text="例如 " /><Run Text="ssh -p 2222 dev@server.example" FontFamily="Cascadia Mono, Consolas" />
+                                    <LineBreak />
+                                    <Run Text="粘贴同时含有指令和密码的登录信息时，密码会自动填到下方。" />
+                                </TextBlock>
+                            </StackPanel>
+
+                            <TextBlock x:Name="SshPasswordLabel" Text="服务器密码"
+                                       Style="{StaticResource FieldLabelStyle}" />
+                            <PasswordBox x:Name="SshPasswordBox" Height="36" Padding="10,6"
+                                         AutomationProperties.LabeledBy="{Binding ElementName=SshPasswordLabel}"
                                          BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" />
                             <CheckBox x:Name="SavePasswordCheckBox"
                                       Content="验证成功后保存到 Windows 凭据管理器"
-                                      Margin="0,13,0,0" />
-
-                            <Border Background="#EFF6FF" CornerRadius="8" Padding="12" Margin="0,18,0,0">
-                                <TextBlock TextWrapping="Wrap" Foreground="#1E40AF"
-                                           Text="应用会先显示服务器 SHA256 主机指纹。只有你确认指纹且密码登录成功后，密码才可能被保存；密码不会写入 Profile、日志或命令行。" />
-                            </Border>
+                                      Margin="0,10,0,0" />
                         </StackPanel>
 
                         <StackPanel x:Name="Step2Panel" Visibility="Collapsed">
                             <TextBlock Text="Windows 本机代理" FontSize="18" FontWeight="SemiBold"
                                        Foreground="{StaticResource TextPrimaryBrush}" />
-                            <TextBlock Text="输入代理监听地址。后续会加入 Clash Verge 等客户端的自动检测。"
-                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,5,0,20" />
+                            <TextBlock Text="服务器无法直连时，使用此代理。"
+                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,4,0,13" />
 
                             <Grid Margin="0,0,0,16">
                                 <Grid.ColumnDefinitions>
@@ -170,13 +248,10 @@
                         </StackPanel>
 
                         <StackPanel x:Name="Step3Panel" Visibility="Collapsed">
-                            <TextBlock Text="项目与安全选项" FontSize="18" FontWeight="SemiBold"
+                            <TextBlock Text="验证 SSH 登录" FontSize="18" FontWeight="SemiBold"
                                        Foreground="{StaticResource TextPrimaryBrush}" />
-                            <TextBlock Text="设置 VS Code 默认打开目录和专用 SSH Key 模式。"
-                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,5,0,20" />
-
-                            <TextBlock Text="默认远程项目目录" Style="{StaticResource FieldLabelStyle}" />
-                            <TextBox x:Name="WorkspaceBox" Text="/" Margin="0,0,0,16" />
+                            <TextBlock Text="核对连接信息后，确认 SSH 主机指纹并验证密码。"
+                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,4,0,13" />
 
                             <TextBlock Text="服务器代理端口" Style="{StaticResource FieldLabelStyle}" />
                             <TextBox x:Name="RemoteProxyPortBox" Text="17897" Margin="0,0,0,16" />
@@ -213,7 +288,7 @@
             </Grid>
         </Border>
 
-        <Grid x:Name="ActionBar" Grid.Row="3" Margin="28,0,28,24">
+        <Grid x:Name="ActionBar" Grid.Row="3" Margin="28,0,28,16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
@@ -253,6 +328,11 @@
                     </StackPanel>
                 </StackPanel>
             </Border>
+        </Border>
+        <Border x:Name="WorkspacePickerOverlay" Grid.RowSpan="4" Panel.ZIndex="20"
+                Visibility="Collapsed" Background="{StaticResource WindowBackgroundBrush}">
+            <ContentControl x:Name="WorkspacePickerContent" HorizontalContentAlignment="Stretch"
+                            VerticalContentAlignment="Stretch" />
         </Border>
     </Grid>
 </UserControl>

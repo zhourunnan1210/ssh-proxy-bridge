@@ -61,6 +61,10 @@ jobs:
         shell: pwsh
         run: .\scripts\tests\test-managed-tunnel-process.ps1
 
+      - name: Check remote VS Code folder arguments
+        shell: pwsh
+        run: .\scripts\tests\test-vscode-arguments.ps1
+
       - name: Build application
         shell: pwsh
         run: dotnet build .\app\SshProxyBridge.App\SshProxyBridge.App.csproj --configuration Release --no-restore --nologo

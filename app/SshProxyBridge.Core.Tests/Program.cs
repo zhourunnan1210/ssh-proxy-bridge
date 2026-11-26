@@ -9,6 +9,8 @@ var tests = new List<(string Name, Func<Task> Run)>
 {
     ("Profile validation accepts a valid draft", TestValidProfile),
     ("Profile validation rejects invalid fields", TestInvalidProfile),
+    ("SSH login commands parse supported endpoints and labeled passwords", TestSshLoginCommand),
+    ("SSH login commands reject unsupported options, syntax and malformed labels", TestInvalidSshLoginCommand),
     ("Profile store round-trips without secrets", TestProfileStoreRoundTrip),
     ("Legacy server edits preserve SSH settings and list removal preserves the script config", TestLegacyProfileManagement),
     ("Credential target is stable and profile-scoped", TestCredentialTarget),
@@ -62,6 +64,65 @@ static Task TestInvalidProfile()
 
     var errors = ProfileValidator.Validate(profile);
     Assert(errors.Count >= 3, "Expected port, alias and workspace errors.");
+    return Task.CompletedTask;
+}
+
+static Task TestSshLoginCommand()
+{
+    Assert(SshLoginCommand.TryParse(" ssh dev@compute.example.invalid ", out var standard)
+        && standard is { Host: "compute.example.invalid", Port: 22, User: "dev", Password: null },
+        "A standard SSH command did not parse with port 22.");
+
+    Assert(SshLoginCommand.TryParse("ssh\t-p 2244 dev@192.0.2.10", out var ipv4)
+        && ipv4 is { Host: "192.0.2.10", Port: 2244 }, "A command with a leading port did not parse.");
+
+    Assert(SshLoginCommand.TryParse("ssh dev@[2001:db8::10] -p2244", out var ipv6)
+        && ipv6 is { Host: "2001:db8::10", Port: 2244, SanitizedCommand: "ssh -p 2244 dev@[2001:db8::10]" },
+        "A bracketed IPv6 address or attached port did not parse.");
+
+    const string fixturePassword = "fixture !@#$%^&*():;<>\\\"'[] 密码: literal  ";
+    var combined = $"登陆指令： ssh dev@tenant@edge.example.invalid -p 2244\r\n密 码 : {fixturePassword}\r\n";
+    Assert(SshLoginCommand.TryParse(combined, out var composite)
+        && composite is { User: "dev@tenant", Password: fixturePassword,
+            SanitizedCommand: "ssh -p 2244 dev@tenant@edge.example.invalid" }
+        && composite.ToString() == composite.SanitizedCommand,
+        "A multiline login block did not preserve the account and password or redact the display value.");
+
+    Assert(SshLoginCommand.TryParse("登录指令: ssh -p2244 dev@edge.example.invalid　密码：fixture", out var inline)
+        && inline is { Port: 2244, Password: "fixture" }, "An inline login block did not parse.");
+    return Task.CompletedTask;
+}
+
+static Task TestInvalidSshLoginCommand()
+{
+    var unsupported = new[]
+    {
+        "ssh edge.example.invalid",
+        "ssh dev@edge.example.invalid -p0",
+        "ssh dev@edge.example.invalid -p65536",
+        "ssh -p+22 dev@edge.example.invalid",
+        "ssh -p22 dev@edge.example.invalid -p22",
+        "ssh -v dev@edge.example.invalid",
+        "ssh dev@edge.example.invalid remote-command",
+        "ssh dev@edge.example.invalid;",
+        "ssh dev@edge.example.invalid\nremote-command",
+        "ssh -dev@edge.example.invalid",
+        "ssh dev@999.0.2.10",
+        "ssh dev@[192.0.2.10]",
+        "登录指令：ssh dev@edge.example.invalid 密码：",
+        "登录指令：ssh dev@edge.example.invalid 密码：fixture\nsecond-line"
+    };
+    foreach (var text in unsupported)
+    {
+        Assert(!SshLoginCommand.TryParse(text, out var details) && details is null,
+            "An unsupported command or login block produced parsed details.");
+    }
+
+    const string malformed = "登录指令：ssh dev@edge.example.invalid 密 码 fixture";
+    Assert(SshLoginCommand.ContainsPasswordLabel(malformed)
+        && !SshLoginCommand.TryParse(malformed, out _), "A malformed password label was not detected.");
+    Assert(!SshLoginCommand.ContainsPasswordLabel("ssh dev@edge.example.invalid"),
+        "A bare SSH command was treated as a credential paste.");
     return Task.CompletedTask;
 }
 

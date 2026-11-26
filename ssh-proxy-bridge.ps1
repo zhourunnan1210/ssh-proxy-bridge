@@ -1536,6 +1536,37 @@ exit 1
     return $ok
 }
 
+function Get-VsCodeArguments($Configuration) {
+    $alias = [string]$Configuration.ssh.alias
+    $workspace = [string]$Configuration.vscode.remoteWorkspace
+    if ($workspace.StartsWith('/')) {
+        $encodedPath = ($workspace -split '/' | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+        $authority = 'ssh-remote+' + [Uri]::EscapeDataString($alias)
+        # Chromium can drop bare URI arguments before VS Code receives them.
+        return @('--new-window', "--folder-uri=vscode-remote://$authority$encodedPath")
+    }
+
+    $arguments = @('--new-window', '--remote', "ssh-remote+$alias")
+    if ($workspace) {
+        $arguments += $workspace
+    }
+    return $arguments
+}
+
+function Get-VsCodeCliScript([string]$CodeRoot, [string]$CodeCommand) {
+    [string]$launcher = Get-Content -LiteralPath $CodeCommand -Raw -ErrorAction SilentlyContinue
+    # Recent installers put the CLI under the active build directory named in code.cmd.
+    $launcherPattern = '(?m)^[ \t]*"%~dp0\.\.\\Code\.exe"[ \t]+"%~dp0\.\.\\((?:[0-9a-f]{7,64}\\)?resources\\app\\out\\cli\.js)"[ \t]+%\*[ \t]*\r?$'
+    if ($launcher -notmatch $launcherPattern) {
+        return
+    }
+
+    $path = Join-Path $CodeRoot $Matches[1]
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        return $path
+    }
+}
+
 function Start-VsCode($Configuration) {
     if (-not [bool]$Configuration.vscode.launch) {
         return
@@ -1544,11 +1575,20 @@ function Start-VsCode($Configuration) {
     if (-not $code) {
         throw 'VS Code command (code.cmd) was not found.'
     }
-    $arguments = @('--new-window', '--remote', "ssh-remote+$($Configuration.ssh.alias)")
-    $workspace = [string]$Configuration.vscode.remoteWorkspace
-    if ($workspace) {
-        $arguments += $workspace
+    $arguments = @(Get-VsCodeArguments $Configuration)
+    $environment = Get-SshProcessEnvironment $Configuration
+    # Invoke the official CLI through the executable to preserve URI escapes.
+    $codeRoot = Split-Path -Parent (Split-Path -Parent $code)
+    $codeExecutable = Join-Path $codeRoot 'Code.exe'
+    $codeCli = Get-VsCodeCliScript $codeRoot $code
+    if ($codeCli -and (Test-Path -LiteralPath $codeExecutable -PathType Leaf)) {
+        $code = $codeExecutable
+        $arguments = @($codeCli) + $arguments
+        if (-not $environment) { $environment = @{} }
+        $environment['ELECTRON_RUN_AS_NODE'] = '1'
+        $environment['VSCODE_DEV'] = $null
     }
+    $argumentLine = ($arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
     # A newly started VS Code instance can outlive this PowerShell process. Keep
     # it away from the GUI-owned stdout/stderr pipes so the GUI can observe that
     # the workflow itself has completed instead of waiting for VS Code to exit.
@@ -1559,9 +1599,8 @@ function Start-VsCode($Configuration) {
     $launchId = '{0}.{1}' -f ([DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff')), $PID
     $stdout = Join-Path $state "vscode.$launchId.stdout.log"
     $stderr = Join-Path $state "vscode.$launchId.stderr.log"
-    $environment = Get-SshProcessEnvironment $Configuration
     Invoke-WithProcessEnvironment $environment {
-        Start-Process -FilePath $code -ArgumentList $arguments -WindowStyle Hidden `
+        Start-Process -FilePath $code -ArgumentList $argumentLine -WindowStyle Hidden `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
     }
     Write-Pass 'VS Code Remote-SSH launch requested.'
