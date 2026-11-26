@@ -1,12 +1,18 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('doctor', 'bootstrap-key', 'setup', 'start', 'repair', 'reload-vscode', 'monitor', 'status', 'stop', 'uninstall')]
+    [ValidateSet('doctor', 'bootstrap-key', 'setup', 'start', 'check-direct', 'start-tunnel', 'repair', 'reload-vscode', 'install-codex', 'monitor', 'status', 'stop', 'uninstall')]
     [string]$Command = 'doctor',
 
     [string]$Config,
 
     [string]$RemoteWorkspace,
+
+    [ValidateSet('auto', 'direct', 'proxy')]
+    [string]$ApplicationRoute = 'auto',
+
+    [ValidateSet('proxy', 'direct', 'upload')]
+    [string]$ExtensionInstallRoute = 'proxy',
 
     [switch]$Force
 )
@@ -716,9 +722,12 @@ $end
     Write-Pass "SSH alias installed: $alias"
 }
 
-function Invoke-Ssh($Configuration, [string]$RemoteCommand, [switch]$UseAlias) {
+function Invoke-Ssh($Configuration, [string]$RemoteCommand, [switch]$UseAlias, [switch]$ReadOnly) {
     $sshExe = Get-Executable 'ssh.exe'
     $arguments = @(Get-SshOneShotArguments $Configuration -UseAlias:$UseAlias)
+    if ($ReadOnly) {
+        $arguments = @('-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no', '-o', 'ControlPath=none') + $arguments
+    }
     $arguments += @(Get-SshTargetArguments $Configuration -UseAlias:$UseAlias)
     $arguments += $RemoteCommand
     $environment = Get-SshProcessEnvironment $Configuration
@@ -1165,7 +1174,7 @@ function Start-Tunnel($Configuration) {
     return $process
 }
 
-function Test-RemoteDirectCodex($Configuration, [switch]$Quiet) {
+function Test-RemoteDirectCodex($Configuration, [switch]$Quiet, [switch]$ReportProbeResult) {
     $script = @'
 set -u
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
@@ -1188,11 +1197,17 @@ exit 1
     $scriptBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
     $command = "printf %s $scriptBase64 | base64 -d | bash"
-    $result = Invoke-Ssh $Configuration $command -UseAlias
+    $result = Invoke-Ssh $Configuration $command -UseAlias:(-not $ReportProbeResult) -ReadOnly:$ReportProbeResult
     $marker = (($result.Output | Where-Object {
-                $_ -match '^CODEX_DIRECT_'
+                $_ -match '^CODEX_DIRECT_(?:OK:401:attempt-[12]|FAILED:(?:\d{3}|none))$'
             } | Select-Object -First 1) -as [string])
     $marker = if ($marker) { $marker.Trim() } else { '' }
+    if ($ReportProbeResult) {
+        if (-not $marker) {
+            throw "The SSH command did not return a direct Codex probe result (exit $($result.ExitCode))."
+        }
+        Write-Host $marker
+    }
     $ok = $result.ExitCode -eq 0 -and $marker -match '^CODEX_DIRECT_OK:'
     if (-not $Quiet) {
         if ($ok) {
@@ -1606,6 +1621,271 @@ function Start-VsCode($Configuration) {
     Write-Pass 'VS Code Remote-SSH launch requested.'
 }
 
+function Get-CodexExtensionProxyUrl([string]$HostName, [int]$Port, [string]$Scheme = 'http') {
+    if ([Uri]::CheckHostName($HostName) -eq [UriHostNameType]::Unknown -or $Port -lt 1 -or $Port -gt 65535) {
+        throw 'The configured proxy host or port is invalid.'
+    }
+    return [UriBuilder]::new($Scheme, $HostName, $Port).Uri.GetLeftPart([UriPartial]::Authority)
+}
+
+function Get-CodexExtensionServerScript {
+    $commit = ''
+    $launcher = Get-Executable 'code.cmd'
+    if ($launcher) {
+        $root = Split-Path -Parent (Split-Path -Parent $launcher)
+        $cli = Get-VsCodeCliScript $root $launcher
+        if ($cli) {
+            $productPath = Join-Path (Split-Path -Parent (Split-Path -Parent $cli)) 'product.json'
+            try {
+                $product = Get-Content -Raw -LiteralPath $productPath | ConvertFrom-Json
+                if ($product.PSObject.Properties['commit'] -and $product.commit -match '^[a-f0-9]{40}$') {
+                    $commit = [string]$product.commit
+                }
+            }
+            catch { }
+        }
+    }
+
+    $source = @'
+set -euo pipefail
+fail() { printf 'CODEX_EXTENSION_ERROR:%s\n' "$1"; exit 1; }
+root=${VSCODE_AGENT_FOLDER:-$HOME/.vscode-server}
+commit='__LOCAL_COMMIT__'
+case "$(uname -s):$(uname -m)" in
+    Linux:x86_64|Linux:amd64) target=linux-x64 ;;
+    Linux:aarch64|Linux:arm64) target=linux-arm64 ;;
+    *) fail unsupported-platform ;;
+esac
+editor=''
+candidates=0
+for candidate in "$root"/cli/servers/{Stable,Insiders}-*/server/bin/code-server "$root"/bin/*/bin/code-server; do
+    [ -x "$candidate" ] || continue
+    candidates=$((candidates + 1))
+    editor=$candidate
+    if [ -n "$commit" ]; then
+        case "$candidate" in
+            */Stable-"$commit"/server/bin/code-server|*/Insiders-"$commit"/server/bin/code-server|*/bin/"$commit"/bin/code-server)
+                candidates=1
+                break
+                ;;
+        esac
+    fi
+done
+[ "$candidates" -gt 0 ] || fail no-editor
+[ "$candidates" -eq 1 ] || fail ambiguous-editor
+extensions=${VSCODE_EXTENSIONS:-$root/extensions}
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy VSCODE_SERVER_PATCHELF_PATH
+install_codex() {
+    "$editor" --force-disable-user-env --server-data-dir "$root" --extensions-dir "$extensions" --install-extension "$@" </dev/null || fail cli-install
+    "$editor" --force-disable-user-env --server-data-dir "$root" --extensions-dir "$extensions" --list-extensions </dev/null |
+        grep -Fx 'openai.chatgpt' >/dev/null || fail cli-verification
+}
+'@
+    return $source.Replace('__LOCAL_COMMIT__', $commit)
+}
+
+function Invoke-CodexExtensionSsh($Configuration, [string]$Source, [int]$TimeoutSeconds, [string]$UploadPath = '') {
+    $ssh = Get-Executable 'ssh.exe'
+    if (-not $ssh) { throw 'OpenSSH client (ssh.exe) was not found.' }
+    # Pass only a fixed Bash program and encoded, validated values. Its stdin stays available for VSIX bytes.
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Source.Replace("`r", '')))
+    $command = 'bash -c "$(printf %s ' + $encoded + ' | base64 -d)"'
+    $arguments = @('-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no', '-o', 'ControlPath=none',
+        '-o', 'ControlMaster=no', '-o', 'ForwardAgent=no') + @(Get-SshOneShotArguments $Configuration)
+    $arguments += @(Get-SshTargetArguments $Configuration)
+    $arguments += $command
+    $environment = Get-SshProcessEnvironment $Configuration
+    if (-not $UploadPath) {
+        return Invoke-NativeProcessWithTimeout $ssh $arguments $null $TimeoutSeconds $environment
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo.FileName = $ssh
+    $process.StartInfo.Arguments = ($arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.CreateNoWindow = $true
+    $process.StartInfo.RedirectStandardInput = $true
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $inputFile = [IO.File]::OpenRead($UploadPath)
+    try {
+        if (-not (Invoke-WithProcessEnvironment $environment { $process.Start() })) {
+            throw 'Could not start the SSH upload.'
+        }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $copy = $inputFile.CopyToAsync($process.StandardInput.BaseStream, 262144)
+        if (-not $copy.Wait($TimeoutSeconds * 1000)) {
+            throw 'Uploading the Codex VSIX over SSH timed out.'
+        }
+        $process.StandardInput.Close()
+        Write-Host 'CODEX_EXTENSION_PROGRESS:remote-install'
+        $remaining = [int][Math]::Max(0, ($TimeoutSeconds * 1000) - $watch.ElapsedMilliseconds)
+        if (-not $process.WaitForExit($remaining)) {
+            throw 'The remote Codex installation timed out.'
+        }
+        $output = $stdout.GetAwaiter().GetResult() + "`n" + $stderr.GetAwaiter().GetResult()
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = @($output -split '\r?\n'); TimedOut = $false }
+    }
+    finally {
+        $inputFile.Dispose()
+        try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+        $process.Dispose()
+    }
+}
+
+function Assert-CodexExtensionSshResult($Result) {
+    if ($Result.ExitCode -eq 0) { return }
+    if ($Result.TimedOut) { throw 'The remote Codex operation timed out.' }
+    $reason = $Result.Output | Where-Object { $_ -match '^CODEX_EXTENSION_ERROR:[a-z-]+$' } | Select-Object -First 1
+    switch ($reason) {
+        'CODEX_EXTENSION_ERROR:no-editor' { throw 'The remote VS Code Server is missing. Connect once in VS Code, then retry.' }
+        'CODEX_EXTENSION_ERROR:ambiguous-editor' { throw 'Multiple remote VS Code Server builds were found, with none matching the local VS Code build. Connect once with this VS Code client, then retry.' }
+        'CODEX_EXTENSION_ERROR:unsupported-platform' { throw 'The Codex installer requires a Linux x64 or arm64 SSH server.' }
+        'CODEX_EXTENSION_ERROR:proxy-unavailable' { throw 'The existing remote proxy cannot reach the VS Code Marketplace. Check the proxy tunnel or choose Windows download and SSH upload.' }
+        'CODEX_EXTENSION_ERROR:archive-integrity' { throw 'The uploaded Codex VSIX was incomplete or its checksum did not match.' }
+        'CODEX_EXTENSION_ERROR:cli-install' { throw 'VS Code Server rejected the Codex installation. Check VS Code Server compatibility and Marketplace connectivity, or try another install route.' }
+        'CODEX_EXTENSION_ERROR:cli-verification' { throw 'VS Code Server did not list Codex after installation.' }
+        default { throw 'The remote Codex operation failed. Check SSH authentication, the host key, and the selected installation route.' }
+    }
+}
+
+function Get-CodexExtensionGalleryUrl([string]$Curl, [string[]]$NetworkArguments, [string]$Target) {
+    $query = @'
+{"filters":[{"criteria":[{"filterType":7,"value":"openai.chatgpt"},{"filterType":8,"value":"Microsoft.VisualStudio.Code"}],"pageSize":1,"pageNumber":1}],"assetTypes":[],"flags":145}
+'@
+    # IncludeVersions (1), IncludeVersionProperties (16), IncludeAssetUri (128).
+    $queryUrl = 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery'
+    $response = Invoke-NativeProcessWithTimeout $Curl ($NetworkArguments + @('--max-time', '40',
+        '--max-filesize', '16777216', '--header', 'Content-Type: application/json', '--header',
+        'Accept: application/json;api-version=7.2-preview.1', '--data-binary', $query.Trim(), $queryUrl)) $null 45
+    if ($response.ExitCode -ne 0) { throw 'Windows could not query Codex package metadata from the Marketplace.' }
+
+    $metadata = ($response.Output -join "`n") | ConvertFrom-Json
+    $edition = $metadata.results | ForEach-Object { $_.extensions } | Where-Object {
+        $_.publisher.publisherName -ieq 'openai' -and $_.extensionName -ieq 'chatgpt'
+    } | Select-Object -First 1
+    if (-not $edition) { throw 'The Marketplace did not return the OpenAI Codex extension.' }
+    $version = $edition.versions | Where-Object {
+        $properties = $_.PSObject.Properties['properties']
+        $prerelease = $properties -and ($properties.Value | Where-Object {
+            $_.key -eq 'Microsoft.VisualStudio.Code.PreRelease' -and $_.value -eq 'true'
+        })
+        -not $prerelease -and $_.PSObject.Properties['targetPlatform'] -and $_.targetPlatform -ceq $Target -and
+        $_.version -match '^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$' -and $_.PSObject.Properties['fallbackAssetUri']
+    } | Sort-Object -Property @{Expression = { [version]$_.version }; Descending = $true } | Select-Object -First 1
+    if (-not $version) { throw 'The Marketplace did not return a release Codex VSIX for the remote Linux architecture.' }
+
+    [Uri]$asset = $null
+    if (-not [Uri]::TryCreate([string]$version.fallbackAssetUri, [UriKind]::Absolute, [ref]$asset) -or
+        $asset.Scheme -ne 'https' -or $asset.Port -ne 443 -or $asset.UserInfo -or $asset.Query -or $asset.Fragment -or
+        $asset.Host -notin @('marketplace.visualstudio.com', 'openai.gallery.vsassets.io', 'openai.gallerycdn.vsassets.io')) {
+        throw 'The Marketplace reported an unexpected Codex package URL.'
+    }
+    return $asset.AbsoluteUri.TrimEnd('/') + "/Microsoft.VisualStudio.Services.VSIXPackage?redirect=true&targetPlatform=$Target"
+}
+
+function Save-CodexExtensionVsix($Configuration, [string]$Target, [string]$Path) {
+    if ($Target -cnotin @('linux-x64', 'linux-arm64')) { throw 'Unsupported Codex package architecture.' }
+    $curl = Get-Executable 'curl.exe' "$env:SystemRoot\System32\curl.exe"
+    if (-not $curl) { throw 'Windows curl.exe is required to download the Marketplace VSIX.' }
+    $networkArguments = @('--silent', '--show-error', '--fail', '--proto', '=https', '--connect-timeout', '15')
+    if (Test-TcpPort ([string]$Configuration.proxy.host) ([int]$Configuration.proxy.port)) {
+        $protocol = $Configuration.proxy.PSObject.Properties['protocol']
+        $scheme = if ($protocol -and $protocol.Value -eq 'socks5') { 'socks5h' } else { 'http' }
+        $proxy = Get-CodexExtensionProxyUrl ([string]$Configuration.proxy.host) ([int]$Configuration.proxy.port) $scheme
+        $networkArguments += @('--noproxy', '', '--proxy', $proxy)
+    }
+    $url = Get-CodexExtensionGalleryUrl $curl $networkArguments $Target
+    $arguments = $networkArguments + @('--location', '--max-redirs', '5', '--proto-redir', '=https',
+        '--max-time', '720', '--max-filesize', '1073741824', '--output', $Path, $url)
+    $result = Invoke-NativeProcessWithTimeout $curl $arguments $null 730
+    if ($result.ExitCode -ne 0) { throw 'Windows could not download the official Codex VSIX from the Marketplace.' }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entry = $archive.GetEntry('extension.vsixmanifest')
+        if (-not $entry -or $entry.Length -gt 65536) { throw 'The downloaded file does not contain a valid VSIX manifest.' }
+        $stream = $entry.Open()
+        try {
+            $manifest = [Xml.XmlDocument]::new()
+            $manifest.XmlResolver = $null
+            $manifest.Load($stream)
+        }
+        finally { $stream.Dispose() }
+        $identity = $manifest.SelectSingleNode("/*[local-name()='PackageManifest']/*[local-name()='Metadata']/*[local-name()='Identity']")
+        if (-not $identity -or $identity.GetAttribute('Publisher') -cne 'openai' -or
+            $identity.GetAttribute('Id') -cne 'chatgpt' -or $identity.GetAttribute('TargetPlatform') -cne $Target) {
+            throw 'The Marketplace package does not match the expected OpenAI Codex extension and Linux architecture.'
+        }
+        $packageEntry = $archive.GetEntry('extension/package.json')
+        if (-not $packageEntry -or $packageEntry.Length -gt 1048576) { throw 'The Codex VSIX package manifest is missing or invalid.' }
+        $reader = [IO.StreamReader]::new($packageEntry.Open())
+        try { $package = $reader.ReadToEnd() | ConvertFrom-Json }
+        finally { $reader.Dispose() }
+        $dependencies = $package.PSObject.Properties['extensionDependencies']
+        if ($dependencies -and $dependencies.Value) {
+            throw 'This Codex VSIX requires other extensions. Use the Marketplace install route to resolve its dependencies.'
+        }
+    }
+    finally { $archive.Dispose() }
+}
+
+function Install-CodexExtension($Configuration, [string]$Route) {
+    Write-Host 'CODEX_EXTENSION_PROGRESS:checking'
+    $serverScript = (Get-CodexExtensionServerScript) + "`n"
+    if ($Route -eq 'upload') {
+        $check = Invoke-CodexExtensionSsh $Configuration ($serverScript + 'printf "CODEX_EXTENSION_TARGET:%s\n" "$target"') 35
+        Assert-CodexExtensionSshResult $check
+        $targetLine = $check.Output | Where-Object { $_ -match '^CODEX_EXTENSION_TARGET:linux-(x64|arm64)$' } | Select-Object -First 1
+        if (-not $targetLine) { throw 'The remote Codex package architecture could not be verified.' }
+        $target = $targetLine.Substring('CODEX_EXTENSION_TARGET:'.Length)
+
+        $path = [IO.Path]::GetTempFileName()
+        try {
+            Write-Host 'CODEX_EXTENSION_PROGRESS:windows-download'
+            Save-CodexExtensionVsix $Configuration $target $path
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $upload = @'
+[ "$target" = '__TARGET__' ] || fail unsupported-platform
+umask 077
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/ssh-proxy-bridge-codex.XXXXXXXX")
+archive="$temporary/openai.chatgpt.vsix"
+trap 'rm -f -- "$archive"; rmdir -- "$temporary"' EXIT
+trap 'exit 130' HUP INT TERM
+cat >"$archive" || fail archive-integrity
+digest=$(sha256sum -- "$archive") || fail archive-integrity
+[ "${digest%% *}" = '__HASH__' ] || fail archive-integrity
+install_codex "$archive" --do-not-include-pack-dependencies
+'@
+            $upload = $upload.Replace('__TARGET__', $target).Replace('__HASH__', $hash)
+            Write-Host 'CODEX_EXTENSION_PROGRESS:ssh-upload'
+            $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + $upload) 1880 $path
+            Assert-CodexExtensionSshResult $result
+        }
+        finally { [IO.File]::Delete($path) }
+    }
+    else {
+        if ($Route -eq 'proxy') {
+            $proxy = Get-CodexExtensionProxyUrl ([string]$Configuration.ssh.remoteProxyHost) ([int]$Configuration.ssh.remoteProxyPort)
+            $proxyBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($proxy))
+            $proxySetup = @'
+proxy=$(printf %s __PROXY_BASE64__ | base64 -d)
+curl -fsSL --proto '=https' --proto-redir '=https' --noproxy '' --proxy "$proxy" \
+    --connect-timeout 5 --max-time 15 -o /dev/null 'https://marketplace.visualstudio.com/items?itemName=openai.chatgpt' || fail proxy-unavailable
+export HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy" http_proxy="$proxy" https_proxy="$proxy"
+'@
+            $serverScript += $proxySetup.Replace('__PROXY_BASE64__', $proxyBase64) + "`n"
+        }
+        Write-Host 'CODEX_EXTENSION_PROGRESS:remote-download-install'
+        $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + 'install_codex openai.chatgpt') 2400
+        Assert-CodexExtensionSshResult $result
+    }
+    Write-Host 'CODEX_EXTENSION_PROGRESS:complete'
+}
+
 function Invoke-Doctor($Configuration) {
     $failures = 0
     $localProxyBlockingFailures = 0
@@ -1784,6 +2064,9 @@ if ($RemoteWorkspace) {
 
 try {
     switch ($Command) {
+        'install-codex' {
+            Install-CodexExtension $configuration $ExtensionInstallRoute
+        }
         'doctor' {
             $doctorExitCode = Invoke-Doctor $configuration
             if ($doctorExitCode -ne 0) {
@@ -1802,10 +2085,44 @@ try {
             Install-RemoteProxyEnvironment $configuration $selectedRoute
             Write-Pass "Setup is complete. Selected application route: $selectedRoute."
         }
+        'check-direct' {
+            if (-not (Test-RemoteDirectCodex $configuration -Quiet -ReportProbeResult)) {
+                exit 2
+            }
+        }
+        'start-tunnel' {
+            Start-ProxyIfNeeded $configuration
+            $existing = Get-TunnelProcess $configuration
+            if ($existing) {
+                Write-Pass "SSH tunnel is already running (PID $($existing.Id))."
+                Write-Host 'Tunnel start result: existing'
+                break
+            }
+
+            Install-SshConfig $configuration
+            $null = Start-Tunnel $configuration
+            if (Test-RemoteProxy $configuration) {
+                $null = Start-Monitor $configuration
+                Write-Host 'Tunnel start result: ready'
+            }
+            else {
+                Write-Warn 'The SSH tunnel was left running. Automatic repair was not started because the Codex proxy probe failed.'
+                Write-Host 'Tunnel start result: unverified'
+            }
+        }
         'start' {
+            if ($ApplicationRoute -eq 'direct' -and -not (Test-RemoteDirectCodex $configuration -Quiet -ReportProbeResult)) {
+                Write-Host 'Start result: proxy-choice-required'
+                exit 3
+            }
             Install-SshConfig $configuration
             Assert-SshLoginReady $configuration
-            $selectedRoute = Select-RemoteCodexRoute $configuration
+            $selectedRoute = if ($ApplicationRoute -eq 'auto') {
+                Select-RemoteCodexRoute $configuration
+            }
+            else {
+                $ApplicationRoute
+            }
             if ($selectedRoute -eq 'direct') {
                 Install-RemoteProxyEnvironment $configuration 'direct'
                 Write-Pass 'Server direct route selected; the Windows proxy tunnel is not required.'

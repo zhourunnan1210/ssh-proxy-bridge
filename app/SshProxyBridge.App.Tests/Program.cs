@@ -1,5 +1,6 @@
 using System.IO;
 using System.Reflection;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -59,6 +60,18 @@ internal static class Program
             var overlayContent = Require<ContentControl>(window, "OverlayContent");
             var mainContent = Require<Grid>(window, "MainContent");
             var profileSelector = Require<ComboBox>(window, "ProfileSelector");
+            var installRouteBox = Require<ComboBox>(window, "ExtensionInstallRouteBox");
+            _ = Require<Button>(window, "InstallCodexButton");
+            _ = Require<TextBlock>(window, "ExtensionInstallStatusText");
+            _ = Require<ProgressBar>(window, "ExtensionInstallProgressBar");
+            _ = Require<Button>(window, "CheckDirectButton");
+            _ = Require<Button>(window, "StartTunnelButton");
+            if (!installRouteBox.Items.OfType<ComboBoxItem>().Select(item => item.Tag as string)
+                    .SequenceEqual(["proxy", "direct", "upload"])
+                || (installRouteBox.SelectedItem as ComboBoxItem)?.Tag as string != "proxy")
+            {
+                throw new InvalidOperationException("The Codex installer did not expose the supported routes with the proxy route selected.");
+            }
             var statusSummaryCard = Require<Border>(window, "StatusSummaryCard");
             var statusSummaryAccent = Require<Border>(window, "StatusSummaryAccent");
             var statusSummaryTitle = Require<TextBlock>(window, "StatusSummaryTitle");
@@ -690,6 +703,42 @@ internal static class Program
                 }
             }
             Console.WriteLine("PASS  A detached child cannot hold the GUI output drain open indefinitely.");
+
+            string[] installerLines =
+            [
+                "CODEX_EXTENSION_PROGRESS:checking",
+                "diagnostic text",
+                "CODEX_EXTENSION_PROGRESS:windows-download",
+                "CODEX_EXTENSION_PROGRESS:ssh-upload",
+                "CODEX_EXTENSION_PROGRESS:remote-install",
+                "CODEX_EXTENSION_PROGRESS:complete"
+            ];
+            var observedStages = new List<string>();
+            using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(string.Join('\n', installerLines))))
+            using (var reader = new StreamReader(stream))
+            {
+                var output = MainWindow.ReadWorkflowLinesAsync(reader, line =>
+                {
+                    if (MainWindow.GetExtensionInstallStageText(line) is { } stage)
+                        observedStages.Add(stage);
+                }, CancellationToken.None).GetAwaiter().GetResult();
+                if (!MainWindow.HasExtensionInstallCompletion(output)
+                    || MainWindow.HasExtensionInstallCompletion("prefix CODEX_EXTENSION_PROGRESS:complete")
+                    || !output.Contains("diagnostic text", StringComparison.Ordinal)
+                    || !observedStages.SequenceEqual([
+                        "正在检查服务器和 VS Code Server…",
+                        "Windows 正在下载 Codex 扩展包…",
+                        "正在通过普通 SSH 上传扩展包…",
+                        "服务器正在解包并安装 Codex…",
+                        "正在确认安装结果…"
+                    ])
+                    || MainWindow.GetExtensionInstallStageText("CODEX_EXTENSION_PROGRESS:remote-download-install")
+                        != "服务器正在下载并安装 Codex 扩展…")
+                {
+                    throw new InvalidOperationException("Codex installation progress did not retain separate stages and diagnostics.");
+                }
+            }
+            Console.WriteLine("PASS  Codex install routes and streamed phases remain visible alongside technical output.");
 
             TestAskPassHelper();
             Console.WriteLine("PASS  AskPass returns only the requested app-owned Windows credential.");

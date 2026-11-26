@@ -107,10 +107,12 @@ start-ssh-proxy-bridge-gui.cmd
 
 1. 启动 SSH Proxy Bridge。
 2. 选择目标服务器。
-3. 点击“连接并打开 VS Code”。
-4. 等待界面显示“已连接 · 服务器直连”或代理连接成功状态。
+3. 点击“测试 Codex 直连”可预先检查服务器出网。点击“连接并打开 VS Code”也会先检查直连。
+4. 直连可用时，应用直接打开远程项目。直连失败时，可确认使用 Windows 代理后继续连接。
 
-应用会直接请求 Codex 实际接口来选择路由。服务器直连成功时不会新建代理隧道；直连失败时才建立或复用 SSH 反向隧道，并再次从服务器验证 Codex 接口可通过代理到达。最后应用更新受管的远程网络环境，让 VS Code Remote-SSH 打开该 Profile 保存的远程目录。
+应用会直接请求 Codex 实际接口来选择路由。使用代理时，应用会建立或复用 SSH 反向隧道，再从服务器验证 Codex 能通过代理到达。最后应用更新受管的远程网络环境，让 VS Code Remote-SSH 打开该 Profile 保存的远程目录。
+
+可以用“启动代理隧道”单独开启端口转发，例如给远端扩展安装使用。
 
 如果隧道已经健康运行，重复点击不会叠加新的受管隧道进程。
 
@@ -119,6 +121,18 @@ start-ssh-proxy-bridge-gui.cmd
 VS Code 启动后，应用会结束“处理中”状态并显示“已连接”。VS Code 作为独立程序继续运行，不需要等到关闭 VS Code 后应用才完成连接流程。
 
 应用的一次性 SSH 检查不会继承用户 SSH Config 中的 `LocalForward`、`RemoteForward` 或 `DynamicForward`，因此已有的其他转发不会让状态检查或连接流程一直等待。单次 SSH 检查超过 20–35 秒会安全失败并显示原因，GUI 自身也有整体等待上限。
+
+## 安装远程 Codex 扩展
+
+先用 VS Code Remote-SSH 连接服务器，使远端具备 VS Code Server。然后在 SSH Proxy Bridge 的服务器页选择安装方式。
+
+- **服务器通过现有代理隧道下载**。远端 VS Code Server 经当前隧道从扩展市场下载和安装。
+- **服务器直接下载**。远端直接访问扩展市场。扩展市场和 Codex 接口的可达性可以不同。
+- **Windows 下载后用 SSH 上传**。应用在 Windows 取得 Linux 版扩展包，通过独立 SSH 会话发送到服务器，再交给远端 VS Code 安装。
+
+安装卡显示本页发起的任务当前正在检查、下载、上传或安装。安装结束后可在 VS Code 的远端扩展列表中确认 Codex。
+
+如果远端 VS Code 显式设置了 `http.proxy`，VS Code CLI 会优先使用这个设置。需要绕过远端扩展市场代理时，可选择 Windows 下载后用 SSH 上传。
 
 ## 当前服务器操作
 
