@@ -24,22 +24,45 @@ if ($Fixture) {
     }, $false)
     if (-not $dispatch) { throw 'Bridge command dispatcher was not found.' }
 
+    foreach ($name in @('Enable-ManagedTunnel', 'Get-ManagedTunnelSnapshot', 'Write-ManagedTunnelStatus',
+            'Write-ApplicationNetworkStatus')) {
+        $node = $ast.Find({
+            param($candidate)
+            $candidate -is [Management.Automation.Language.FunctionDefinitionAst] -and $candidate.Name -eq $name
+        }, $false)
+        if (-not $node) { throw "Missing bridge function $name." }
+        . ([scriptblock]::Create($node.Extent.Text))
+    }
+
     function Test-RemoteDirectCodex($Configuration, [switch]$Quiet, [switch]$ReportProbeResult) {
         if (-not ($Quiet -and $ReportProbeResult)) { throw 'Direct probe should use the read-only reporting path.' }
         Write-Host 'direct-probe'
         return $Fixture -notin @('check-fail', 'start-direct-fail')
     }
     function Start-ProxyIfNeeded($Configuration) { Write-Host 'local-proxy' }
+    $script:intent = 'unspecified'
+    $script:tunnelStarted = $false
+    $script:monitorStarted = $false
+    function Get-TunnelIntent { return $script:intent }
+    function Set-TunnelIntent([string]$Intent) { $script:intent = $Intent }
+    function Enter-RepairLock { return ,([IO.MemoryStream]::new()) }
     function Get-TunnelProcess($Configuration) {
-        if ($Fixture -eq 'tunnel-existing') { return [pscustomobject]@{ Id = 1234 } }
+        if ($Fixture -eq 'tunnel-existing' -or $script:tunnelStarted) { return [pscustomobject]@{ Id = 1234 } }
         return $null
     }
+    function Get-MonitorProcess { if ($script:monitorStarted) { return [pscustomobject]@{ Id = 5678 } } }
     function Install-SshConfig($Configuration) { Write-Host 'ssh-config' }
     function Assert-SshLoginReady($Configuration) { Write-Host 'ssh-ready' }
     function Select-RemoteCodexRoute($Configuration) { Write-Host 'auto-select'; return 'proxy' }
-    function Start-Tunnel($Configuration) { Write-Host 'tunnel-start' }
+    function Start-Tunnel($Configuration) {
+        $script:tunnelStarted = $true
+        Write-Host 'tunnel-start'
+    }
     function Stop-Tunnel($Configuration) { throw 'Route controls must not stop the tunnel.' }
-    function Start-Monitor($Configuration) { Write-Host 'monitor-start' }
+    function Start-Monitor($Configuration) {
+        $script:monitorStarted = $true
+        Write-Host 'monitor-start'
+    }
     function Test-RemoteProxy($Configuration) {
         Write-Host 'probe-proxy'
         return $Fixture -ne 'tunnel-new-unverified'
@@ -49,11 +72,17 @@ if ($Fixture) {
         Write-Host "remote-env:$Route"
     }
     function Start-VsCode($Configuration) { Write-Host 'vscode-start' }
-    function Test-RemoteApplicationNetwork($Configuration, [switch]$Quiet) {
+    function Test-RemoteApplicationNetwork($Configuration, [switch]$Quiet, [switch]$SuppressMarkers) {
         $script:LastApplicationNetworkRoute = $script:installedRoute
+        $script:LastApplicationNetworkReason = 'ready'
+        $script:LastApplicationNetworkMarker = "APPLICATION_NETWORK_READY:$($script:installedRoute):no-active-codex"
+        $script:LastCodexAccountAccessMarker = 'CODEX_ACCOUNT_ACCESS:unknown:unknown:none'
         return $true
     }
-    function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet) { return $true }
+    function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet, [switch]$IncludeExtensionStatus) {
+        $script:LastRemoteCodexAuthenticationState = 'ready'
+        return $true
+    }
     function Write-Pass([string]$Message) { Write-Host $Message }
     function Write-Warn([string]$Message) { Write-Host $Message }
 
@@ -92,9 +121,9 @@ $cases = @(
     @{ Name = 'start-direct-pass'; Code = 0; Required = @('direct-probe', 'remote-env:direct', 'vscode-start'); Forbidden = @('auto-select', 'local-proxy', 'tunnel-start') }
     @{ Name = 'start-proxy'; Code = 0; Required = @('local-proxy', 'tunnel-start', 'monitor-start', 'remote-env:proxy', 'vscode-start'); Forbidden = @('auto-select', 'direct-probe') }
     @{ Name = 'start-auto'; Code = 0; Required = @('auto-select', 'remote-env:proxy', 'vscode-start'); Forbidden = @('direct-probe') }
-    @{ Name = 'tunnel-existing'; Code = 0; Required = @('Tunnel start result: existing'); Forbidden = @('ssh-config', 'tunnel-start', 'monitor-start', 'remote-env:', 'vscode-start') }
-    @{ Name = 'tunnel-new-verified'; Code = 0; Required = @('tunnel-start', 'monitor-start', 'Tunnel start result: ready'); Forbidden = @('remote-env:', 'vscode-start') }
-    @{ Name = 'tunnel-new-unverified'; Code = 0; Required = @('tunnel-start', 'Tunnel start result: unverified'); Forbidden = @('monitor-start', 'remote-env:', 'vscode-start') }
+    @{ Name = 'tunnel-existing'; Code = 0; Required = @('Tunnel start result: existing', 'Tunnel state: running', 'remote-env:proxy'); Forbidden = @('ssh-config', 'tunnel-start', 'vscode-start') }
+    @{ Name = 'tunnel-new-verified'; Code = 0; Required = @('tunnel-start', 'monitor-start', 'remote-env:proxy', 'Application network: proxy', 'Tunnel start result: ready'); Forbidden = @('vscode-start') }
+    @{ Name = 'tunnel-new-unverified'; Code = 0; Required = @('tunnel-start', 'Tunnel state: running', 'Tunnel start result: unverified'); Forbidden = @('monitor-start', 'remote-env:', 'vscode-start') }
 )
 
 foreach ($case in $cases) {

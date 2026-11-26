@@ -51,7 +51,7 @@ internal static class Program
             var productButton = Require<Button>(window, "ProductNavButton");
             var serversButton = Require<Button>(window, "ServersNavButton");
             var addServerButton = Require<Button>(window, "AddServerButton");
-            var repairButton = Require<Button>(window, "RepairButton");
+            var refreshButton = Require<Button>(window, "StatusButton");
             var productPage = Require<Grid>(window, "ProductPage");
             var serverPage = Require<Grid>(window, "ServerPage");
             var viewer = Require<FlowDocumentScrollViewer>(window, "ProductDocumentViewer");
@@ -64,9 +64,14 @@ internal static class Program
             _ = Require<Button>(window, "InstallCodexButton");
             var extensionServerStatus = Require<TextBlock>(window, "ExtensionServerStatusText");
             var extensionInstallStatus = Require<TextBlock>(window, "ExtensionInstallStatusText");
+            var extensionInstallControls = Require<StackPanel>(window, "ExtensionInstallControls");
             _ = Require<ProgressBar>(window, "ExtensionInstallProgressBar");
             _ = Require<Button>(window, "CheckDirectButton");
-            _ = Require<Button>(window, "StartTunnelButton");
+            var tunnelButton = Require<Button>(window, "StartTunnelButton");
+            if (refreshButton.Parent is not WrapPanel actions
+                || !actions.Children.OfType<Button>().Select(button => button.Name)
+                    .SequenceEqual(["ConnectButton", "CheckDirectButton", "StartTunnelButton", "StatusButton"]))
+                throw new InvalidOperationException("The server action row must expose four controls.");
             if (!installRouteBox.Items.OfType<ComboBoxItem>().Select(item => item.Tag as string)
                     .SequenceEqual(["proxy", "direct", "upload"])
                 || (installRouteBox.SelectedItem as ComboBoxItem)?.Tag as string != "proxy")
@@ -224,7 +229,7 @@ internal static class Program
 
             var statusText = Require<TextBlock>(window, "StatusText");
             updateState.Invoke(window, ["stop", 1, "[FAIL] Access is denied."]);
-            if (statusText.Text != "停止连接失败"
+            if (statusText.Text != "关闭代理隧道失败"
                 || proxyDot.Fill is not SolidColorBrush proxyAfterStopFailure
                 || proxyAfterStopFailure.Color != Color.FromRgb(34, 197, 94))
             {
@@ -232,7 +237,7 @@ internal static class Program
                     "A failed stop was shown as successful or reset the unrelated local proxy indicator.");
             }
             updateState.Invoke(window, ["stop", 0, "[PASS] Stopped SSH tunnel PID 123."]);
-            if (statusText.Text != "已停止")
+            if (statusText.Text != "代理隧道已关闭")
                 throw new InvalidOperationException("A successful stop was not shown as stopped.");
             Console.WriteLine("PASS  Stop displays the real operation result and preserves local proxy status.");
 
@@ -244,7 +249,7 @@ internal static class Program
                     "Automatic tunnel repair started (PID 123).\nApplication network: proxy"
                 ]);
             if (statusText.Text != "已连接 · 自动修复"
-                || repairButton.Parent is not WrapPanel)
+                || refreshButton.Parent is not WrapPanel)
             {
                 throw new InvalidOperationException(
                     "The repair workflow is missing from the current-server action row.");
@@ -287,7 +292,7 @@ internal static class Program
                 ["repair", staleRouteOutput]);
             if (staleSummary is null
                 || !staleSummary.Contains("0/2", StringComparison.Ordinal)
-                || !staleSummary.Contains("重载并重新连接", StringComparison.Ordinal))
+                || !staleSummary.Contains("重新连接远程 VS Code", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     "Stale-route diagnosis did not explain the affected process count and next action.");
@@ -344,7 +349,8 @@ internal static class Program
                 [
                     "status",
                     0,
-                    "Proxy: running\nTunnel: running\nAuto repair: running\nApplication network: proxy\nCodex authentication: sign-in required"
+                    "Proxy: running\nTunnel: running\nAuto repair: running\nApplication network: proxy\n" +
+                    "CODEX_ACCOUNT_ACCESS:reachable:proxy:401:process\nCodex authentication: sign-in required"
                 ]);
             if (statusText.Text != "需要登录 Codex")
             {
@@ -352,6 +358,31 @@ internal static class Program
                     "Missing remote Codex authentication was incorrectly shown as connected.");
             }
             Console.WriteLine("PASS  Missing Codex authentication is shown separately from network health.");
+
+            const string refreshOutput = "[FAIL] Old route did not validate\nApplication network: not ready\n" +
+                "REFRESH_FINAL_STATUS\nTunnel: running\nApplication network: proxy\n" +
+                "CODEX_ACCOUNT_ACCESS:unreachable:proxy:403:process\nCodex authentication: sign-in required\nRefresh result: repaired";
+            updateState.Invoke(window, ["refresh", 1, refreshOutput]);
+            var refreshSummary = (string?)buildUserFacingLog.Invoke(null, ["refresh", refreshOutput]);
+            if (statusText.Text != "Codex 无法访问" || refreshSummary is null
+                || !refreshSummary.Contains("已执行自动修复并复查", StringComparison.Ordinal)
+                || !refreshSummary.Contains("通过 Windows 代理隧道无法访问", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Refresh hid the final account reachability problem or its repair result.");
+            }
+            updateState.Invoke(window, ["refresh", 0,
+                "REFRESH_FINAL_STATUS\nTunnel: stopped\nTunnel intent: disabled\nApplication network: not ready"]);
+            if (statusText.Text != "代理隧道已关闭")
+                throw new InvalidOperationException("Refresh misclassified an intentionally disabled tunnel.");
+            updateState.Invoke(window, ["refresh", 0,
+                "REFRESH_FINAL_STATUS\nTunnel state: interrupted\nApplication network: direct\nRefresh result: attention"]);
+            if (statusText.Text != "直连可用 · 隧道待恢复")
+                throw new InvalidOperationException("A healthy direct route masked an interrupted requested tunnel.");
+            var incompleteStopSummary = (string?)buildUserFacingLog.Invoke(null,
+                ["stop", "Tunnel intent: disabled\nTunnel state: running\n[FAIL] Cannot stop the managed tunnel"]);
+            if (incompleteStopSummary is null || !incompleteStopSummary.Contains("代理隧道仍在运行", StringComparison.Ordinal))
+                throw new InvalidOperationException("A failed stop was reported as fully closed.");
+            Console.WriteLine("PASS  Refresh prefers the final account check and respects a disabled tunnel.");
 
             const string layeredSshFailureOutput =
                 "Proxy: running\n" +
@@ -451,7 +482,7 @@ internal static class Program
                 || !proxyRouteFailureSummary.StartsWith(
                     "诊断结论：SSH 可以登录，但服务器无法通过 Windows 代理路线",
                     StringComparison.Ordinal)
-                || !proxyRouteFailureSummary.Contains("一键修复连接", StringComparison.Ordinal))
+                || !proxyRouteFailureSummary.Contains("刷新状态", StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
                     "The failed proxy route did not produce an actionable diagnosis.");
@@ -558,6 +589,12 @@ internal static class Program
             var applyExtensionStatus = typeof(MainWindow).GetMethod(
                 "ApplyExtensionServerStatusLine", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("Extension server state is not available.");
+            var applyAccountAccess = typeof(MainWindow).GetMethod(
+                "ApplyCodexAccountAccessLine", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Account access state is not available.");
+            var applyTunnelState = typeof(MainWindow).GetMethod(
+                "ApplyTunnelStateLine", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Tunnel state is not available.");
             var refreshExtensionDisplay = typeof(MainWindow).GetMethod(
                 "DisplayExtensionInstallState", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("Extension state display was not found.");
@@ -566,21 +603,43 @@ internal static class Program
                 activeFixture, false, @"C:\fixture\runtime.json"));
             applyExtensionStatus.Invoke(window, [activeFixture.Id, "CODEX_EXTENSION_STATUS:installed:sign-in-required\r"]);
             applyExtensionStatus.Invoke(window, [Guid.NewGuid(), "CODEX_EXTENSION_STATUS:not-installed:signed-in"]);
-            if (extensionServerStatus.Text != "服务器已安装 · 未登录"
-                || extensionInstallStatus.Visibility != Visibility.Collapsed)
+            applyAccountAccess.Invoke(window, [activeFixture.Id, "CODEX_ACCOUNT_ACCESS:unreachable:proxy:403:process"]);
+            applyAccountAccess.Invoke(window, [Guid.NewGuid(), "CODEX_ACCOUNT_ACCESS:reachable:direct:401:process"]);
+            if (extensionServerStatus.Text != "服务器已安装 · 无法访问"
+                || extensionInstallStatus.Visibility != Visibility.Collapsed
+                || extensionInstallControls.Visibility != Visibility.Collapsed)
             {
-                throw new InvalidOperationException("An installed server's sign-in state was lost or overwritten by a different server.");
+                throw new InvalidOperationException("The installed server did not show the inaccessible account service and hide the installer.");
             }
+            applyAccountAccess.Invoke(window, [activeFixture.Id, "CODEX_ACCOUNT_ACCESS:reachable:proxy:401:shell"]);
+            if (extensionServerStatus.Text != "服务器已安装 · 扩展访问待确认")
+                throw new InvalidOperationException("A shell-only probe was treated as the active extension's network state.");
+            applyAccountAccess.Invoke(window, [activeFixture.Id, "CODEX_ACCOUNT_ACCESS:reachable:proxy:401:process"]);
+            if (extensionServerStatus.Text != "服务器已安装 · 未登录")
+                throw new InvalidOperationException("A reachable account service did not expose the sign-in result.");
             applyExtensionStatus.Invoke(window, [activeFixture.Id, "CODEX_EXTENSION_STATUS:installed:signed-in"]);
             if (extensionServerStatus.Text != "服务器已安装 · 已登录")
                 throw new InvalidOperationException("The installed extension's sign-in status did not update.");
             applyExtensionStatus.Invoke(window, [activeFixture.Id, "CODEX_EXTENSION_STATUS:unknown:unknown"]);
             if (extensionServerStatus.Text != "无法确认服务器安装和登录状态"
-                || MainWindow.GetExtensionServerStatusText("prefix CODEX_EXTENSION_STATUS:installed:sign-in-required") is not null
-                || MainWindow.GetExtensionServerStatusText("CODEX_EXTENSION_STATUS:installed:other") is not null)
+                || extensionInstallControls.Visibility != Visibility.Visible
+                || applyExtensionStatus.Invoke(window,
+                    [activeFixture.Id, "prefix CODEX_EXTENSION_STATUS:installed:sign-in-required"]) is true
+                || applyExtensionStatus.Invoke(window,
+                    [activeFixture.Id, "CODEX_EXTENSION_STATUS:installed:other"]) is true)
             {
                 throw new InvalidOperationException("Unknown or malformed extension status was treated as a verified state.");
             }
+            applyTunnelState.Invoke(window, [activeFixture.Id, "Tunnel state: running"]);
+            applyTunnelState.Invoke(window, [Guid.NewGuid(), "Tunnel state: stopped"]);
+            if (!Equals(tunnelButton.Content, "隧道运行中 · 关闭"))
+                throw new InvalidOperationException("Another profile overrode the active tunnel switch.");
+            applyTunnelState.Invoke(window, [activeFixture.Id, "Tunnel state: interrupted"]);
+            if (!Equals(tunnelButton.Content, "隧道已中断 · 恢复"))
+                throw new InvalidOperationException("The tunnel switch did not offer to recover an interrupted connection.");
+            applyTunnelState.Invoke(window, [activeFixture.Id, "Tunnel state: stopped"]);
+            if (!Equals(tunnelButton.Content, "隧道已关闭 · 启用"))
+                throw new InvalidOperationException("The tunnel switch did not offer to enable a stopped tunnel.");
             selectedProfile.SetValue(window, null);
             refreshExtensionDisplay.Invoke(window, null);
             if (extensionServerStatus.Text != "选择服务器后检测安装和登录状态")

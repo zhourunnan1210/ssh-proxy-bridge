@@ -29,21 +29,16 @@ $ast = [Management.Automation.Language.Parser]::ParseFile(
 if ($errors.Count -gt 0) {
     throw "Could not parse the bridge script: $($errors[0].Message)"
 }
-$probe = $ast.Find({
-    param($node)
-    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -eq 'Test-RemoteApplicationNetwork'
-}, $false)
-if (-not $probe) {
-    throw 'The remote application network probe was not found.'
+foreach ($name in @('Test-RemoteApplicationNetwork', 'Install-RemoteProxyEnvironment')) {
+    $function = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+    }, $false)
+    if (-not $function) { throw "Bridge function $name was not found." }
+    . ([scriptblock]::Create($function.Extent.Text))
 }
-. ([scriptblock]::Create($probe.Extent.Text))
 
-function Invoke-Ssh($Configuration, [string]$Command, [switch]$UseAlias) {
-    if ($Command -notmatch '^printf %s ([A-Za-z0-9+/=]+) \| base64 -d \| bash$') {
-        throw 'Unexpected command from the remote application network probe.'
-    }
-    $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
+function Invoke-FixtureBash([string]$Payload) {
     $setup = @'
 set -e
 fixture_home=$1
@@ -56,11 +51,20 @@ export SSH_PROXY_BRIDGE_ROUTE=proxy HTTPS_PROXY=http://127.0.0.1:17897
 chmod +x "$HOME/bin/curl"
 [ "$(command -v curl)" = "$HOME/bin/curl" ]
 set +e
+exec 2>&1
 '@
     $inputScript = $setup.Replace("`r", '') + "`n" + $payload + "`n# End of test input"
     $PSNativeCommandUseErrorActionPreference = $false
     $output = @($inputScript | & $BashPath --noprofile --norc -s -- $fixtureHome)
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+}
+
+function Invoke-Ssh($Configuration, [string]$Command, [switch]$UseAlias) {
+    if ($Command -notmatch '^printf %s ([A-Za-z0-9+/=]+) \| base64 -d \| bash$') {
+        throw 'Unexpected command from the remote application network probe.'
+    }
+    $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
+    return Invoke-FixtureBash $payload
 }
 
 function Assert-NetworkProbe([string]$Bashrc, [string]$Marker, [bool]$ExpectedReady) {
@@ -71,11 +75,18 @@ function Assert-NetworkProbe([string]$Bashrc, [string]$Marker, [bool]$ExpectedRe
     }
 }
 
+function Test-SshLogin($Configuration, [switch]$Quiet) { return $true }
+function Get-StatePath([string]$Name) { return Join-Path $fixtureHome $Name }
+function Write-Utf8NoBom([string]$Path, [string]$Content) { [IO.File]::WriteAllText($Path, $Content) }
+function Write-Pass([string]$Message) { }
+
 $configuration = [pscustomobject]@{
     ssh = [pscustomobject]@{ remoteProxyHost = '127.0.0.1'; remoteProxyPort = 17897 }
 }
 $fixtureHome = Join-Path ([IO.Path]::GetTempPath()) "ssh-proxy-bridge-shell-$([Guid]::NewGuid().ToString('N'))"
 $fixtureBin = Join-Path $fixtureHome 'bin'
+$dotFiles = Join-Path $fixtureHome 'dotfiles'
+$linkTarget = Join-Path $dotFiles 'init shell.sh'
 $bashrcPath = Join-Path $fixtureHome '.bashrc'
 $curlPath = Join-Path $fixtureBin 'curl'
 $fakeCurl = @'
@@ -114,9 +125,73 @@ export SSH_PROXY_BRIDGE_ROUTE=direct
     $mismatchedBashrc = $chattyBashrc.Replace(':17897', ':17898')
     Assert-NetworkProbe $mismatchedBashrc 'APPLICATION_NETWORK_SHELL_MISMATCH:proxy' $false
     Write-Host 'PASS  A mismatched proxy URL still fails shell validation.'
+
+    $legacyProxy = @'
+timeout() { return 0; }
+# user settings outside the managed block
+export CUSTOM_SETTING=retained
+# >>> codex-remote-proxy >>>
+if timeout 1 bash -c '</dev/tcp/127.0.0.1/17897' 2>/dev/null; then
+    export HTTPS_PROXY=http://127.0.0.1:17897
+    export SSH_PROXY_BRIDGE_ROUTE=proxy
+fi
+# <<< codex-remote-proxy <<<
+'@
+    Assert-NetworkProbe $legacyProxy 'APPLICATION_NETWORK_READY:proxy:no-active-codex' $true
+    if (-not $script:LastManagedProxyGuarded) { throw 'Old managed proxy guard was not detected.' }
+
+    Install-RemoteProxyEnvironment $configuration 'proxy'
+    $updatedProxy = [IO.File]::ReadAllText($bashrcPath).Replace('timeout() { return 0; }', 'timeout() { return 1; }')
+    if (-not $updatedProxy.Contains('export CUSTOM_SETTING=retained') -or
+            -not $updatedProxy.Contains('export ALL_PROXY="$HTTP_PROXY"') -or $updatedProxy.Contains('/dev/tcp/')) {
+        throw 'Proxy migration did not preserve user settings and persist the loopback proxy.'
+    }
+    Assert-NetworkProbe $updatedProxy 'APPLICATION_NETWORK_READY:proxy:no-active-codex' $true
+    if ($script:LastManagedProxyGuarded) { throw 'Migrated proxy configuration was mistaken for the legacy guard.' }
+    Write-Host 'PASS  The proxy route survives a down listener at shell startup and the migration preserves user settings.'
+
+    $start = '# >>> codex-remote-proxy >>>'
+    $end = '# <<< codex-remote-proxy <<<'
+    foreach ($markers in @(@($start), @($end), @($start, $start, $end, $end))) {
+        $broken = (@('export USER_BEFORE=keep') + $markers + @('export USER_AFTER=keep', '')) -join "`n"
+        [IO.File]::WriteAllText($bashrcPath, $broken)
+        $failure = ''
+        try { Install-RemoteProxyEnvironment $configuration 'proxy' }
+        catch { $failure = $_.Exception.Message }
+        if (-not $failure.Contains('Invalid managed proxy markers') -or [IO.File]::ReadAllText($bashrcPath) -cne $broken) {
+            throw 'Invalid managed markers were accepted or the original user file changed.'
+        }
+    }
+    Write-Host 'PASS  Unbalanced and nested managed markers are rejected without changing the original file.'
+
+    [IO.File]::WriteAllText($bashrcPath, 'export CUSTOM_SETTING=retained' + "`n")
+    $previousMsys = $env:MSYS
+    try {
+        if ($env:OS -eq 'Windows_NT') { $env:MSYS = 'winsymlinks:sys' }
+        $linked = Invoke-FixtureBash @'
+set -e
+mkdir -- "$HOME/dotfiles"
+mv -- "$HOME/.bashrc" "$HOME/dotfiles/init shell.sh"
+ln -s -- 'dotfiles/init shell.sh' "$HOME/.bashrc"
+[ -L "$HOME/.bashrc" ]
+'@
+    }
+    finally { $env:MSYS = $previousMsys }
+    if ($linked.ExitCode -ne 0) { throw "Could not create shell symlink fixture: $($linked.Output -join ' ')" }
+
+    Install-RemoteProxyEnvironment $configuration 'direct'
+    $preserved = Invoke-FixtureBash @'
+[ -L "$HOME/.bashrc" ] &&
+    [ "$(readlink -- "$HOME/.bashrc")" = 'dotfiles/init shell.sh' ] &&
+    grep -Fqx 'export CUSTOM_SETTING=retained' "$HOME/dotfiles/init shell.sh" &&
+    grep -Fqx "export SSH_PROXY_BRIDGE_ROUTE='direct'" "$HOME/dotfiles/init shell.sh"
+'@
+    if ($preserved.ExitCode -ne 0) { throw 'The symlink or the target user settings were replaced.' }
+    Write-Host 'PASS  Installing updates an existing regular symlink target while preserving the link and user content.'
 }
 finally {
-    Remove-Item -LiteralPath $curlPath, $bashrcPath -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $curlPath, $bashrcPath, $linkTarget, (Join-Path $fixtureHome 'application-route.intent') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $dotFiles -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fixtureBin -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fixtureHome -ErrorAction SilentlyContinue
 }

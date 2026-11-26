@@ -29,7 +29,9 @@ public partial class MainWindow : Window
     private readonly SshBootstrapService _bootstrapService = new();
     private ProfileListItem? _selectedProfile;
     private readonly Dictionary<Guid, ExtensionInstallDisplay> _extensionInstallDisplays = new();
-    private readonly Dictionary<Guid, string> _extensionServerStatuses = new();
+    private readonly Dictionary<Guid, ExtensionServerStatus> _extensionServerStatuses = new();
+    private readonly Dictionary<Guid, CodexAccountAccess> _codexAccountAccess = new();
+    private readonly Dictionary<Guid, string> _tunnelStates = new();
     private const string UnknownExtensionServerStatus = "无法确认服务器安装和登录状态";
     private bool _operationInProgress;
     private bool _suppressSelectionStatus;
@@ -248,45 +250,38 @@ public partial class MainWindow : Window
 
         await RunWorkflowAsync(
             "start",
-            "正在检测服务器能否直连 Codex…",
+            SelectedTunnelState is "running" or "interrupted"
+                ? "正在检查代理隧道并打开 VS Code…" : "正在检测服务器能否直连 Codex…",
             showFailureDialog: true,
-            applicationRoute: "direct");
+            applicationRoute: SelectedTunnelState is "running" or "interrupted" ? "proxy" : "direct");
     }
 
     private async void CheckDirect_Click(object sender, RoutedEventArgs e) =>
         await RunWorkflowAsync("check-direct", "正在检测服务器能否直连 Codex…", showFailureDialog: false);
 
-    private async void StartTunnel_Click(object sender, RoutedEventArgs e) =>
-        await RunWorkflowAsync("start-tunnel", "正在启动 Windows 代理隧道…", showFailureDialog: true);
-
-    private async void Status_Click(object sender, RoutedEventArgs e)
+    private async void StartTunnelButton_Click(object sender, RoutedEventArgs e)
     {
-        await RunWorkflowAsync("status", "正在刷新状态…", showFailureDialog: true);
+        var (command, progress) = SelectedTunnelState switch
+        {
+            "running" => ("stop", "正在关闭代理隧道，保留当前 VS Code SSH 会话…"),
+            "stopped" or "interrupted" => ("start-tunnel", "正在启用 Windows 代理隧道…"),
+            _ => ("status", "正在检查当前服务器的代理隧道…")
+        };
+        await RunWorkflowAsync(command, progress, showFailureDialog: false);
     }
 
-    private async void Repair_Click(object sender, RoutedEventArgs e)
-    {
+    private async void Status_Click(object sender, RoutedEventArgs e) =>
         await RunWorkflowAsync(
-            "repair",
-            "正在分层检查 SSH、网络路线和 Codex 进程；不会在未经确认时重载 VS Code…",
-            showFailureDialog: true);
-    }
-
-    private async void Stop_Click(object sender, RoutedEventArgs e)
-    {
-        await RunWorkflowAsync("stop", "正在停止受管隧道…", showFailureDialog: true);
-    }
-
-    private async void Diagnostics_Click(object sender, RoutedEventArgs e)
-    {
-        await RunWorkflowAsync("doctor", "正在执行分层诊断…", showFailureDialog: true);
-    }
+            "refresh",
+            "正在检查 SSH、代理隧道和 Codex 访问，发现问题时会尝试修复…",
+            showFailureDialog: false);
 
     private async void InstallCodex_Click(object sender, RoutedEventArgs e)
     {
         if (_operationInProgress || _toolRoot is null
             || _selectedProfile is not { ConfigPath: not null } item
             || (!item.IsLegacy && item.Profile.Status != ProfileStatus.Ready)
+            || IsExtensionInstalled(item.Profile.Id)
             || (ExtensionInstallRouteBox.SelectedItem as ComboBoxItem)?.Tag is not string route)
         {
             return;
@@ -305,17 +300,17 @@ public partial class MainWindow : Window
                     if (GetExtensionInstallStageText(line) is { } stage)
                         SetExtensionInstallState(context.ProfileId, stage, busy: true);
                     reportedServerStatus |= ApplyExtensionServerStatusLine(context.ProfileId, line);
+                    ApplyCodexAccountAccessLine(context.ProfileId, line);
                 });
             var output = string.Join(Environment.NewLine,
                 new[] { result.StandardOutput, result.StandardError }
                     .Where(value => !string.IsNullOrWhiteSpace(value)));
             var completed = result.ExitCode == 0 && HasExtensionInstallCompletion(result.StandardOutput);
             if (completed && !reportedServerStatus)
-                SetExtensionServerStatus(context.ProfileId, "服务器已安装 · 登录状态未知");
+                SetExtensionServerStatus(context.ProfileId, new ExtensionServerStatus("installed", "unknown"));
 
             SetExtensionInstallState(context.ProfileId,
-                completed ? "Codex 扩展安装完成" : "Codex 扩展安装失败，查看技术详情。",
-                completed: completed);
+                completed ? "Codex 扩展安装完成" : "Codex 扩展安装失败，查看技术详情。");
             if (IsWorkflowProfileCurrent(context))
             {
                 var prefix = completed ? "Codex 扩展安装完成。" : "Codex 扩展安装失败。";
@@ -356,76 +351,133 @@ public partial class MainWindow : Window
     internal static bool HasExtensionInstallCompletion(string output) => output.Split('\n')
         .Any(line => line.Trim() == "CODEX_EXTENSION_PROGRESS:complete");
 
-    internal static string? GetExtensionServerStatusText(string line)
+    private static ExtensionServerStatus? ParseExtensionServerStatus(string line)
     {
         var parts = line.Trim().Split(':');
-        if (parts.Length != 3 || parts[0] != "CODEX_EXTENSION_STATUS")
+        if (parts.Length != 3 || parts[0] != "CODEX_EXTENSION_STATUS"
+            || parts[1] is not ("installed" or "not-installed" or "unknown")
+            || parts[2] is not ("signed-in" or "sign-in-required" or "unknown"))
+        {
             return null;
+        }
+        return new ExtensionServerStatus(parts[1], parts[2]);
+    }
 
-        var installation = parts[1] switch
+    private static string FormatExtensionServerStatus(ExtensionServerStatus status, CodexAccountAccess? accountAccess)
+    {
+        var installation = status.Installation switch
         {
             "installed" => "服务器已安装",
             "not-installed" => "服务器未安装",
-            "unknown" => "服务器安装状态未知",
-            _ => null
+            _ => "服务器安装状态未知"
         };
-        var signIn = parts[2] switch
+        if (status.Installation == "not-installed")
+            return installation;
+        if (accountAccess?.Status == "unreachable")
+            return $"{installation} · 无法访问";
+        if (status.Installation == "unknown" && status.SignIn == "unknown")
+            return UnknownExtensionServerStatus;
+        if (accountAccess is not { Status: "reachable", Origin: "process" })
+            return $"{installation} · 扩展访问待确认";
+
+        var signIn = status.SignIn switch
         {
             "signed-in" => "已登录",
             "sign-in-required" => "未登录",
-            "unknown" => "登录状态未知",
-            _ => null
+            _ => "登录状态未知"
         };
-        if (installation is null || signIn is null)
-            return null;
-
-        return parts[1] == "unknown" && parts[2] == "unknown"
-            ? UnknownExtensionServerStatus
-            : $"{installation} · {signIn}";
+        return $"{installation} · {signIn}";
     }
 
     private bool ApplyExtensionServerStatusLine(Guid profileId, string line)
     {
-        if (GetExtensionServerStatusText(line) is not { } text)
+        if (ParseExtensionServerStatus(line) is not { } status)
             return false;
 
-        SetExtensionServerStatus(profileId, text);
+        SetExtensionServerStatus(profileId, status);
         return true;
     }
 
-    private void SetExtensionServerStatus(Guid profileId, string text)
+    private void SetExtensionServerStatus(Guid profileId, ExtensionServerStatus status)
     {
-        _extensionServerStatuses[profileId] = text;
+        _extensionServerStatuses[profileId] = status;
         if (_selectedProfile?.Profile.Id == profileId)
             DisplayExtensionInstallState();
     }
 
-    private void SetExtensionInstallState(Guid profileId, string text, bool busy = false, bool completed = false)
+    private bool IsExtensionInstalled(Guid profileId) =>
+        _extensionServerStatuses.GetValueOrDefault(profileId)?.Installation == "installed";
+
+    private static Match GetAccountAccessMatch(string output) => Regex.Match(output,
+        @"(?m)^CODEX_ACCOUNT_ACCESS:(reachable|unreachable|unknown):(direct|proxy|unknown):([0-9]{3}|none)(?::(process|shell|unknown))?\r?$");
+
+    private void ApplyCodexAccountAccessLine(Guid profileId, string line)
     {
-        _extensionInstallDisplays[profileId] = new ExtensionInstallDisplay(text, busy, completed);
+        var match = GetAccountAccessMatch(line);
+        if (!match.Success)
+            return;
+
+        _codexAccountAccess[profileId] = new CodexAccountAccess(match.Groups[1].Value, match.Groups[4].Value);
+        if (_selectedProfile?.Profile.Id == profileId)
+            DisplayExtensionInstallState();
+    }
+
+    private void SetExtensionInstallState(Guid profileId, string text, bool busy = false)
+    {
+        _extensionInstallDisplays[profileId] = new ExtensionInstallDisplay(text, busy);
         DisplayExtensionInstallState();
+    }
+
+    private string? SelectedTunnelState => _selectedProfile is { } item
+        ? _tunnelStates.GetValueOrDefault(item.Profile.Id) : null;
+
+    private void ApplyTunnelStateLine(Guid profileId, string line)
+    {
+        var match = Regex.Match(line.Trim(), @"^Tunnel state: (running|stopped|interrupted|unknown)$");
+        if (!match.Success)
+            return;
+
+        _tunnelStates[profileId] = match.Groups[1].Value;
+        if (_selectedProfile?.Profile.Id == profileId)
+            DisplayTunnelState();
+    }
+
+    private void DisplayTunnelState()
+    {
+        StartTunnelButton.Content = SelectedTunnelState switch
+        {
+            "running" => "隧道运行中 · 关闭",
+            "stopped" => "隧道已关闭 · 启用",
+            "interrupted" => "隧道已中断 · 恢复",
+            _ => "检查代理隧道"
+        };
     }
 
     private void DisplayExtensionInstallState()
     {
-        if (ExtensionServerStatusText is null || ExtensionInstallStatusText is null || ExtensionInstallProgressBar is null)
+        if (ExtensionServerStatusText is null || ExtensionInstallStatusText is null || ExtensionInstallProgressBar is null
+            || ExtensionInstallControls is null)
             return;
 
         var item = _selectedProfile;
+        var serverStatus = item is null ? null : _extensionServerStatuses.GetValueOrDefault(item.Profile.Id);
         ExtensionServerStatusText.Text = item switch
         {
             null => "选择服务器后检测安装和登录状态",
             { IsLegacy: false, Profile.Status: not ProfileStatus.Ready } => "完成 SSH 初始化后检测",
             { ConfigPath: null } => UnknownExtensionServerStatus,
-            _ => _extensionServerStatuses.GetValueOrDefault(item.Profile.Id, "安装和登录状态待检测")
+            _ when serverStatus is not null => FormatExtensionServerStatus(
+                serverStatus, _codexAccountAccess.GetValueOrDefault(item.Profile.Id)),
+            _ => "安装和登录状态待检测"
         };
+        ExtensionInstallControls.Visibility = serverStatus?.Installation == "installed"
+            ? Visibility.Collapsed : Visibility.Visible;
         var progress = item is null ? null : _extensionInstallDisplays.GetValueOrDefault(item.Profile.Id);
         ExtensionInstallStatusText.Text = progress?.Text ?? string.Empty;
         ExtensionInstallStatusText.Visibility = progress is null ? Visibility.Collapsed : Visibility.Visible;
-        ExtensionInstallProgressBar.Visibility = progress is { Busy: true } or { Completed: true }
+        ExtensionInstallProgressBar.Visibility = progress is { Busy: true }
             ? Visibility.Visible : Visibility.Collapsed;
         ExtensionInstallProgressBar.IsIndeterminate = progress?.Busy == true;
-        ExtensionInstallProgressBar.Value = progress?.Completed == true ? ExtensionInstallProgressBar.Maximum : 0;
     }
 
     private void AddServer_Click(object sender, RoutedEventArgs e)
@@ -1076,20 +1128,23 @@ public partial class MainWindow : Window
         var reloadAfterRepair = false;
         var connectThroughProxy = false;
         var refreshSelectedProfile = false;
-        var checkingExtension = command == "status";
+        var checkingExtension = command is "status" or "refresh";
         var reportedExtensionStatus = false;
         if (checkingExtension)
-            SetExtensionServerStatus(operationContext.ProfileId, "正在检测服务器安装和登录状态…");
+        {
+            _codexAccountAccess.Remove(operationContext.ProfileId);
+            DisplayExtensionInstallState();
+        }
 
         try
         {
             var arguments = applicationRoute is null ? null : new[] { "-ApplicationRoute", applicationRoute };
-            Action<string>? processLine = checkingExtension
-                ? line => reportedExtensionStatus |= ApplyExtensionServerStatusLine(operationContext.ProfileId, line)
-                : null;
-            var result = await RunPowerShellWithOptionsAsync(command, operationContext.ConfigPath, arguments, processLine);
-            if (checkingExtension && !reportedExtensionStatus)
-                SetExtensionServerStatus(operationContext.ProfileId, UnknownExtensionServerStatus);
+            var result = await RunPowerShellWithOptionsAsync(command, operationContext.ConfigPath, arguments, line =>
+            {
+                reportedExtensionStatus |= ApplyExtensionServerStatusLine(operationContext.ProfileId, line);
+                ApplyCodexAccountAccessLine(operationContext.ProfileId, line);
+                ApplyTunnelStateLine(operationContext.ProfileId, line);
+            });
 
             var output = string.Join(Environment.NewLine,
                 new[] { result.StandardOutput, result.StandardError }
@@ -1156,9 +1211,9 @@ public partial class MainWindow : Window
         finally
         {
             if (checkingExtension && !reportedExtensionStatus)
-                SetExtensionServerStatus(operationContext.ProfileId, UnknownExtensionServerStatus);
+                SetExtensionServerStatus(operationContext.ProfileId, new ExtensionServerStatus("unknown", "unknown"));
 
-            if ((command is "start" or "start-tunnel" or "repair") && IsWorkflowProfileCurrent(operationContext))
+            if ((command is "start" or "start-tunnel" or "refresh") && IsWorkflowProfileCurrent(operationContext))
                 await RefreshLocalProxyIndicatorAsync(operationProfile.Profile);
 
             _operationInProgress = false;
@@ -1311,7 +1366,8 @@ public partial class MainWindow : Window
         "status" => TimeSpan.FromSeconds(45),
         "stop" => TimeSpan.FromSeconds(45),
         "check-direct" => TimeSpan.FromSeconds(60),
-        "start-tunnel" => TimeSpan.FromSeconds(90),
+        "start-tunnel" => TimeSpan.FromMinutes(3),
+        "refresh" => TimeSpan.FromMinutes(3),
         "install-codex" => TimeSpan.FromMinutes(45),
         _ => TimeSpan.FromMinutes(2)
     };
@@ -1322,15 +1378,24 @@ public partial class MainWindow : Window
             return $"命令 {command} 已完成，但没有返回诊断详情。";
 
         var detail = output.Trim();
+        output = GetFinalStatusOutput(command, output);
+        var repaired = command == "refresh" && detail.Contains("Refresh result: repaired", StringComparison.Ordinal);
+        var repairSummary = repaired ? "已执行自动修复并复查。\n" : string.Empty;
+        string Describe(string summary) => repairSummary + summary + "\n\n—— 技术详情 ——\n" + detail;
         if (command == "check-direct")
         {
-            var description = DirectProbeSucceeded(output)
-                ? "直连检测成功。服务器可以直接访问 Codex。"
-                : DirectProbeReturnedFailure(output)
-                    ? "直连检测未通过。可以选择启动 Windows 代理隧道。"
-                    : "直连检测未完成。请查看技术详情并检查 SSH 连接。";
-            return description + "\n\n—— 技术详情 ——\n" + detail;
+            var description = DirectProbeSucceeded(output) ? "直连检测成功。服务器可以直接访问 Codex 和 ChatGPT 账户服务。"
+                : Regex.IsMatch(output, @"(?m)^CODEX_DIRECT_ACCOUNT:unreachable:(?:[0-9]{3}|none)\r?$")
+                    ? "服务器无法直连 ChatGPT 账户服务。可启用 Windows 代理隧道。"
+                : DirectProbeReturnedFailure(output) ? "直连检测未通过。可启用 Windows 代理隧道。"
+                : "直连检测未完成。请查看技术详情并检查 SSH 连接。";
+            return Describe(description);
         }
+
+        if (command == "stop" && IsTunnelDisabled(output))
+            return Describe("代理隧道已关闭。现有 VS Code SSH 会话仍可使用。");
+        if (command == "stop" && Regex.IsMatch(output, @"(?m)^Tunnel state: running\r?$"))
+            return Describe("关闭请求未完成，代理隧道仍在运行。请查看技术详情。");
 
         if (RequiresProxyChoice(output))
         {
@@ -1338,12 +1403,13 @@ public partial class MainWindow : Window
                    "—— 技术详情 ——\n" + detail;
         }
 
-        if (command == "start-tunnel" && GetTunnelStartResult(output) is { } tunnelResult)
+        if (command == "start-tunnel" && !output.Contains("Application network:", StringComparison.Ordinal)
+            && GetTunnelStartResult(output) is { } tunnelResult)
         {
             var description = tunnelResult == "unverified"
                 ? "SSH 隧道已启动，Codex 代理复验未通过。隧道仍在运行。"
                 : "SSH 代理隧道正在运行。";
-            return description + "\n\n—— 技术详情 ——\n" + detail;
+            return Describe(description);
         }
 
         var applicationNetworkDirect = output.Contains(
@@ -1371,18 +1437,19 @@ public partial class MainWindow : Window
         // never be presented as a real "sign in required" diagnosis.
         if (sshNotReady)
         {
-            return
+            return Describe(
                 "诊断结论：服务器 SSH 登录不可用，因此后续的隧道、应用网络和 Codex 登录结果暂时无效。\n" +
-                "下一步：确认服务器在线，并核对 SSH 地址、端口和认证配置，然后再次运行诊断。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+                "下一步：确认服务器在线，核对 SSH 地址、端口和认证配置后刷新状态。");
         }
+
+        if (IsTunnelDisabled(output) && !applicationNetworkDirect)
+            return Describe("代理隧道已关闭，刷新状态会保留此设置。\n下一步：如需使用 Windows 代理，点击隧道按钮启用。");
 
         if (tunnelNotReady)
         {
-            return
+            return Describe(
                 "诊断结论：SSH 可以登录，但 Windows 本机代理或 SSH 隧道尚未就绪。\n" +
-                "下一步：确认本机代理已启动，然后运行“一键修复连接”。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+                "下一步：确认本机代理已启动，然后刷新状态。若隧道尚未启用，可用隧道按钮开启。");
         }
 
         var processMismatch = Regex.Match(
@@ -1398,29 +1465,25 @@ public partial class MainWindow : Window
                 : "服务器直连";
             var ready = processMismatch.Groups[2].Value;
             var total = processMismatch.Groups[3].Value;
-            return
+            return Describe(
                 "诊断结论：隧道或新网络路线已经准备好，但运行中的 Codex 仍使用旧路线。\n" +
                 $"当前路线：{route}；已采用新路线的 Codex 进程：{ready}/{total}。\n" +
-                "为什么按钮看似无效：运行中进程的环境变量无法通过修改 ~/.bashrc 热更新。\n" +
-                "下一步：点击“一键修复连接”，然后在确认面板中选择“重载并重新连接”。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+                "下一步：保存工作后重新连接远程 VS Code，使 Codex 进程加载新路线。");
         }
 
         if (output.Contains("APPLICATION_NETWORK_BASHRC_INVALID", StringComparison.OrdinalIgnoreCase))
         {
-            return
+            return Describe(
                 "诊断结论：服务器 ~/.bashrc 存在语法错误，Codex 无法获得网络配置。\n" +
-                "下一步：运行“一键修复连接”；如果仍失败，请保留下面的技术详情。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+                "下一步：查看技术详情中的语法错误，修正后刷新状态。");
         }
 
         if (output.Contains("APPLICATION_NETWORK_SHELL_MISMATCH", StringComparison.OrdinalIgnoreCase)
             || output.Contains("APPLICATION_NETWORK_ROUTE_MISSING", StringComparison.OrdinalIgnoreCase))
         {
-            return
+            return Describe(
                 "诊断结论：SSH 和隧道可能正常，但服务器的新 Shell 没有采用所选网络路线。\n" +
-                "下一步：运行“一键修复连接”，软件会重新写入并验证远端配置。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+                "下一步：刷新状态可重新检查并修复已配置的路线。");
         }
 
         if (directRouteFailed)
@@ -1428,21 +1491,30 @@ public partial class MainWindow : Window
             var noHttpResponse = output.Contains(
                 "APPLICATION_NETWORK_DIRECT_FAILED:000",
                 StringComparison.OrdinalIgnoreCase);
-            return
+            return Describe(
                 "诊断结论：服务器直连 Codex 已中断，需要切换到 Windows 代理。\n" +
                 (noHttpResponse
                     ? "检测细节：服务器没有收到 HTTP 响应（000），常见原因是 DNS 解析、TLS 握手或服务器出口线路异常。\n"
                     : string.Empty) +
-                "下一步：运行“一键修复连接”；若已有 Codex 进程，软件会提示是否重载远程 VS Code。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+                "下一步：可用隧道按钮启用 Windows 代理路线。");
         }
 
         if (output.Contains("APPLICATION_NETWORK_PROXY_FAILED:", StringComparison.OrdinalIgnoreCase))
         {
-            return
+            return Describe(
                 "诊断结论：SSH 可以登录，但服务器无法通过 Windows 代理路线访问 Codex。\n" +
-                "下一步：确认 Windows 本机代理工作正常，然后运行“一键修复连接”重建并复验路线。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+                "下一步：确认 Windows 本机代理工作正常，再刷新状态。");
+        }
+
+        var accountAccess = GetAccountAccessMatch(output);
+        if (accountAccess.Groups[1].Value == "unreachable")
+        {
+            var throughProxy = accountAccess.Groups[2].Value == "proxy";
+            return Describe(throughProxy
+                ? "诊断结论：通过 Windows 代理隧道无法访问 ChatGPT 账户服务。\n" +
+                  "下一步：检查本机代理对 chatgpt.com 的规则，然后刷新状态。"
+                : "诊断结论：服务器无法直连 ChatGPT 账户服务。\n" +
+                  "下一步：可用隧道按钮启用 Windows 代理路线。");
         }
 
         if (output.Contains("APPLICATION_NETWORK_CODEX_NOT_RUNNING", StringComparison.OrdinalIgnoreCase))
@@ -1455,36 +1527,69 @@ public partial class MainWindow : Window
 
         if (applicationNetworkNotReady)
         {
-            return
+            return Describe(
                 "诊断结论：SSH 和隧道已经通过基础检查，但远程 Codex 的应用网络尚未就绪。\n" +
-                "下一步：运行“一键修复连接”；请先解决应用网络问题，再判断是否需要登录 Codex。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+                "下一步：刷新状态以检查并修复网络路线。");
         }
 
-        if (IsCodexSignInRequired(output))
+        if (accountAccess.Groups[1].Value == "reachable" && accountAccess.Groups[4].Value == "process"
+            && IsCodexSignInRequired(output))
         {
-            return
-                "诊断结论：网络路线正常，但远程 Codex 尚未登录。\n" +
-                "下一步：在当前服务器的 VS Code 窗口中打开 Codex，并选择使用 ChatGPT 登录。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+            return Describe(
+                "诊断结论：ChatGPT 账户服务可访问，服务器上尚未检测到 Codex 登录凭据。\n" +
+                "下一步：在当前服务器的 VS Code 窗口中打开 Codex，并选择使用 ChatGPT 登录。");
         }
+
+        if (accountAccess.Groups[1].Value == "reachable" && accountAccess.Groups[4].Value == "shell"
+            && HasInstalledExtension(output))
+        {
+            var route = accountAccess.Groups[2].Value == "proxy" ? "通过 Windows 代理隧道" : "直接";
+            return Describe($"检查结果：远程 Shell 可{route}访问 ChatGPT 账户服务。当前未检测到远程 Codex 进程。\n" +
+                "下一步：在远程 VS Code 窗口中打开 Codex，然后刷新状态。");
+        }
+
+        if (accountAccess.Groups[1].Value == "unknown" && HasInstalledExtension(output))
+            return Describe("诊断结论：暂时无法验证远程 Codex 到 ChatGPT 账户服务的路线。\n" +
+                "下一步：在远程 VS Code 窗口中打开 Codex，然后刷新状态。");
 
         if (applicationNetworkDirect)
         {
-            return
-                "检查结果：连接正常。\n当前路线：服务器直连 Codex，不依赖 Windows 代理隧道。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+            if (TunnelNeedsRecovery(output))
+                return Describe("服务器直连可用。已启用的代理隧道仍待恢复，请查看技术详情。");
+            return Describe("检查结果：连接正常。\n当前路线：服务器直连 Codex。");
         }
 
         if (output.Contains("Application network: proxy", StringComparison.OrdinalIgnoreCase))
         {
-            return
-                "检查结果：连接正常。\n当前路线：通过 SSH 隧道使用 Windows 本机代理。\n\n" +
-                "—— 技术详情 ——\n" + detail;
+            return Describe("检查结果：连接正常。\n当前路线：通过 SSH 隧道使用 Windows 本机代理。");
         }
 
         return detail;
     }
+
+    private static string GetFinalStatusOutput(string command, string output)
+    {
+        if (command != "refresh")
+            return output;
+
+        var match = Regex.Match(output, @"(?m)^REFRESH_FINAL_STATUS\r?$");
+        if (!match.Success)
+            return output;
+
+        var finalOutput = output[(match.Index + match.Length)..];
+        var end = Regex.Match(finalOutput, @"(?m)^Refresh result: (?:checked|repaired|attention)\r?$");
+        return end.Success ? finalOutput[..(end.Index + end.Length)] : finalOutput;
+    }
+
+    private static bool IsTunnelDisabled(string output) =>
+        Regex.IsMatch(output, @"(?m)^Tunnel intent: disabled\r?$")
+        && Regex.IsMatch(output, @"(?m)^Tunnel(?: state)?: stopped\r?$");
+
+    private static bool TunnelNeedsRecovery(string output) =>
+        Regex.IsMatch(output, @"(?m)^Tunnel state: interrupted\r?$");
+
+    private static bool HasInstalledExtension(string output) =>
+        Regex.IsMatch(output, @"(?m)^CODEX_EXTENSION_STATUS:installed:(?:signed-in|sign-in-required|unknown)\r?$");
 
     private static bool DirectProbeSucceeded(string output) =>
         Regex.IsMatch(output, @"(?m)^CODEX_DIRECT_OK:401:attempt-[12]\r?$");
@@ -1580,7 +1685,7 @@ public partial class MainWindow : Window
             return new StatusSummaryContent(
                 string.Empty,
                 "尚未生成检查结果。",
-                "运行诊断或刷新状态后，这里会显示结论。");
+                "刷新状态后，这里会显示检查结果。");
         }
 
         var normalized = text
@@ -1691,6 +1796,7 @@ public partial class MainWindow : Window
 
     private void UpdateStateFromResult(string command, int exitCode, string output)
     {
+        output = GetFinalStatusOutput(command, output);
         if (command == "check-direct")
         {
             if (exitCode == 0 && DirectProbeSucceeded(output))
@@ -1708,7 +1814,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (command == "start-tunnel")
+        if (command == "start-tunnel" && !output.Contains("Application network:", StringComparison.Ordinal))
         {
             switch (GetTunnelStartResult(output))
             {
@@ -1753,7 +1859,7 @@ public partial class MainWindow : Window
             "Application network: proxy",
             StringComparison.OrdinalIgnoreCase);
         var applicationNetworkReady = applicationNetworkDirect || applicationNetworkProxy;
-        var requiresApplicationNetwork = command is "start" or "repair" or "status";
+        var requiresApplicationNetwork = command is "start" or "repair" or "status" or "refresh" or "start-tunnel";
         var directUnreachable = output.Contains(
             "APPLICATION_NETWORK_DIRECT_FAILED:",
             StringComparison.OrdinalIgnoreCase);
@@ -1761,7 +1867,9 @@ public partial class MainWindow : Window
         var tunnelNotReady = IsTunnelNotReady(
             output,
             applicationNetworkDirect || directUnreachable);
-        var codexSignInRequired = IsCodexSignInRequired(output);
+        var accountCheck = GetAccountAccessMatch(output);
+        var accountAccess = accountCheck.Groups[1].Value;
+        var accountScope = accountCheck.Groups[4].Value;
         var staleCodexRoute = output.Contains(
             "APPLICATION_NETWORK_PROCESS_MISMATCH:",
             StringComparison.OrdinalIgnoreCase);
@@ -1784,13 +1892,17 @@ public partial class MainWindow : Window
         if (command == "stop")
         {
             if (exitCode == 0)
-                SetState("已停止", StateKind.Idle);
+                SetState("代理隧道已关闭", StateKind.Idle);
             else
-                SetState("停止连接失败", StateKind.Error);
+                SetState("关闭代理隧道失败", StateKind.Error);
         }
         else if (sshNotReady)
         {
             SetState("SSH 连接不可用", StateKind.Error);
+        }
+        else if (IsTunnelDisabled(output) && !applicationNetworkDirect)
+        {
+            SetState("代理隧道已关闭", StateKind.Idle);
         }
         else if (tunnelNotReady)
         {
@@ -1816,6 +1928,10 @@ public partial class MainWindow : Window
         {
             SetState("Windows 代理路线不可用", StateKind.Error);
         }
+        else if (accountAccess == "unreachable")
+        {
+            SetState("Codex 无法访问", StateKind.Error);
+        }
         else if (codexNotRunning)
         {
             SetState("未检测到远程 Codex", StateKind.Warning);
@@ -1828,9 +1944,13 @@ public partial class MainWindow : Window
         {
             SetState("应用网络未就绪", StateKind.Error);
         }
-        else if (codexSignInRequired)
+        else if (accountAccess == "reachable" && accountScope == "process" && IsCodexSignInRequired(output))
         {
-            SetState("需要登录 Codex", StateKind.Error);
+            SetState("需要登录 Codex", StateKind.Warning);
+        }
+        else if ((accountAccess == "unknown" || accountScope == "shell") && HasInstalledExtension(output))
+        {
+            SetState("Codex 访问待确认", StateKind.Warning);
         }
         else if (exitCode != 0)
         {
@@ -1838,7 +1958,10 @@ public partial class MainWindow : Window
         }
         else if (applicationNetworkDirect)
         {
-            SetState("已连接 · 服务器直连", StateKind.Connected);
+            if (TunnelNeedsRecovery(output))
+                SetState("直连可用 · 隧道待恢复", StateKind.Warning);
+            else
+                SetState("已连接 · 服务器直连", StateKind.Connected);
         }
         else if (command is "start" or "repair"
                  || (tunnelRunning && autoRepairRunning))
@@ -1913,15 +2036,14 @@ public partial class MainWindow : Window
         ConnectButton.Content = canInitialize ? "完成 SSH 初始化" : "连接并打开 VS Code";
         CheckDirectButton.IsEnabled = enabled && canRun && _selectedProfile?.ConfigPath is not null;
         StartTunnelButton.IsEnabled = enabled && canRun && _selectedProfile?.ConfigPath is not null;
-        StatusButton.IsEnabled = enabled && canRun;
-        RepairButton.IsEnabled = enabled && canRun;
-        StopButton.IsEnabled = enabled && canRun;
-        DiagnosticsButton.IsEnabled = enabled && canRun;
+        DisplayTunnelState();
+        StatusButton.IsEnabled = enabled && canRun && _selectedProfile?.ConfigPath is not null;
         AddServerButton.IsEnabled = enabled;
         var canManageProfile = _selectedProfile is not null;
         EditProfileButton.IsEnabled = enabled && canManageProfile;
         DeleteProfileButton.IsEnabled = enabled && canManageProfile;
-        var canInstall = enabled && canRun && _selectedProfile?.ConfigPath is not null && _toolRoot is not null;
+        var canInstall = enabled && canRun && _selectedProfile is { ConfigPath: not null } item
+                         && _toolRoot is not null && !IsExtensionInstalled(item.Profile.Id);
         ExtensionInstallRouteBox.IsEnabled = canInstall;
         InstallCodexButton.IsEnabled = canInstall;
     }
@@ -1957,7 +2079,11 @@ public partial class MainWindow : Window
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 
-    private sealed record ExtensionInstallDisplay(string Text, bool Busy, bool Completed);
+    private sealed record ExtensionInstallDisplay(string Text, bool Busy);
+
+    private sealed record ExtensionServerStatus(string Installation, string SignIn);
+
+    private sealed record CodexAccountAccess(string Status, string Origin);
 
     internal sealed record StatusSummaryContent(
         string Server,

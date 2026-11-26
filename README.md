@@ -4,17 +4,17 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/zhourunnan1210/ssh-proxy-bridge?label=Windows%20Release)](https://github.com/zhourunnan1210/ssh-proxy-bridge/releases/latest)
 
-**自动为远程服务器上的 VS Code 和 Codex 选择可用网络：服务器直连优先，Windows 本机代理兜底。**
+**在 Windows 上管理远程 VS Code、Codex 网络和 SSH 代理隧道。**
 
 你的 Windows 可以通过代理联网，但 SSH 服务器上的 Codex 连不上？
 
-打开 SSH Proxy Bridge，填入服务器信息和本机代理设置，再点击一次连接。程序会先从服务器测试 Codex 的真实接口：直连可用就直接使用服务器网络；直连不可用才建立 SSH 代理通道，随后用 VS Code 打开指定的远程项目。
+打开 SSH Proxy Bridge，填写服务器和本机代理信息，然后用 VS Code 打开指定的远程项目。可以单独检测服务器能否直连 Codex，也可以按需启用 Windows 代理隧道。
 
 [**下载 Windows 版本**](https://github.com/zhourunnan1210/ssh-proxy-bridge/releases/latest) · [查看完整用户手册](USER_GUIDE.md)
 
-![SSH Proxy Bridge 主界面示意图](docs/images/app-overview.svg)
+![SSH Proxy Bridge 早期主界面示意图](docs/images/app-overview.svg)
 
-> 上图使用的是示例服务器信息，不包含真实地址或账号。
+> 上图为早期界面示意，使用示例服务器信息。当前操作见下方说明。
 
 ## 它帮你做什么
 
@@ -23,24 +23,22 @@
 SSH Proxy Bridge 会：
 
 - 从服务器直接检查 Codex 接口是否可达。
-- 直连不可用时检查并按配置启动 Windows 本机代理。
-- 仅在需要时通过 SSH 把本机代理安全地带到远程服务器。
+- 根据所选服务器的隧道状态，使用服务器直连或经 SSH 转发 Windows 本机代理。
+- 将远程 Codex 的安装情况、账户服务可达性和登录状态显示在服务器页。
 - 为服务器设置 Codex 等工具能够识别的直连或代理环境。
 - 直接用 VS Code 打开你指定的远程项目目录。
-- 在网络波动或 SSH 被重置后自动检查并重建受管隧道。
+- 检查并恢复已启用的受管隧道，保留用户主动关闭隧道的选择。
 - 用醒目的彩色状态卡直接说明“是否正常、当前是哪台服务器、下一步做什么”，技术详情默认折叠。
 - 保存多个服务器，下次只需选择服务器并点击连接。
 
 ## 三步开始使用
-
-![下载、添加服务器、连接并打开 VS Code](docs/images/quick-start.svg)
 
 ### 1. 下载并解压
 
 打开 [Releases](https://github.com/zhourunnan1210/ssh-proxy-bridge/releases/latest)，下载名称类似下面的文件：
 
 ```text
-SSH-Proxy-Bridge-v0.2.8-win-x64.zip
+SSH-Proxy-Bridge-v0.2.9-win-x64.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code`。下载完成后右键选择“全部解压”，不要直接在压缩包预览窗口里运行程序。
@@ -57,22 +55,24 @@ SSH-Proxy-Bridge-v0.2.8-win-x64.zip
 
 ### 3. 连接并打开 VS Code
 
-选择服务器并点击“连接并打开 VS Code”。软件会自动判断服务器应当直连还是使用 Windows 代理；只有需要代理回退且未配置自动启动时，才需要你手动打开代理软件。
+选择服务器并点击“连接并打开 VS Code”。代理隧道已启用时，应用会沿用代理路线。隧道关闭时，应用先检测直连。直连失败后，可以确认使用 Windows 代理再继续。
 
-连接成功后，VS Code 会直接打开远程目录。以后日常使用通常只有四步：
+连接成功后，VS Code 会直接打开保存的远程目录。服务器页还有三项操作。
 
-> 打开 SSH Proxy Bridge → 选择服务器 → 点击连接 → 自动选择直连或代理
+- **测试 Codex 直连**。仅检查服务器能否直接访问 Codex 接口。
+- **代理隧道切换**。按钮显示当前隧道状态。可在同一按钮上启用、关闭或恢复隧道。
+- **刷新状态**。在当前页面显示诊断结果，必要时恢复已启用的隧道或修复受管网络配置。刷新保留已关闭的隧道设置和现有 VS Code 窗口。
 
 ## 工作原理
 
 ![SSH Proxy Bridge 工作原理](docs/images/how-it-works.svg)
 
-当服务器无法直连 Codex 时，它使用 SSH 反向隧道，把服务器上的本地代理入口连接到 Windows 代理。服务器侧入口默认只监听 `127.0.0.1`，不会直接向服务器外部网络开放。服务器能够直连时不会新建代理隧道。
+启用代理时，SSH 反向隧道把服务器上的代理入口连接到 Windows 代理。服务器侧入口默认只监听 `127.0.0.1`。服务器直连使用服务器自身的网络。
 
 ## 使用前需要准备
 
 - Windows 10/11 x64。
-- 已经启动的 HTTP、HTTPS 或 mixed 代理软件。
+- 使用代理路线时，需要可用的 HTTP、HTTPS 或 mixed 代理软件。
 - VS Code 和 Microsoft Remote - SSH 扩展。
 - 一台可以通过 SSH 登录的 Linux 服务器。
 - 服务器允许 TCP 端口转发。普通服务器建议允许公钥认证；只允许密码认证的云平台 SSH 网关也受支持。
@@ -99,23 +99,30 @@ SSH-Proxy-Bridge-v0.2.8-win-x64.zip
 <details>
 <summary><strong>SSH 初始化或登录失败</strong></summary>
 
-检查服务器地址、SSH 端口、用户名和密码，并确认服务器允许 TCP 端口转发。软件会自动识别普通公钥服务器和只允许密码的云平台网关；密码网关需要勾选“保存密码”。仍然失败时，点击软件中的“运行诊断”查看具体环节。
+检查服务器地址、SSH 端口、用户名和密码，并确认服务器允许 TCP 端口转发。软件会识别普通公钥服务器和只允许密码的云平台网关。密码网关需要勾选“保存密码”。连接失败时，可以用“刷新状态”查看具体环节。
 
 </details>
 
 <details>
 <summary><strong>VS Code 已打开，但 Codex 仍然无法联网</strong></summary>
 
-先点击“刷新状态”。新版会直接用中文说明失败层级。若显示橙色“隧道正常 · 需重载 VS Code”，说明通道已经恢复，但运行中的 Codex 无法热更新网络环境；点击“一键修复连接”，保存工作后可在内嵌确认面板选择“重载并重新连接”。软件会重新打开远程目录并复验，只有 Codex 真正采用新路线后才显示绿色。
+先点击“刷新状态”。如果现有 Codex 进程仍使用旧网络环境，卡片会提示保存工作后在 VS Code 中重新连接。刷新期间，现有 VS Code 窗口保持打开。
 
-每次检查结果都会在彩色“当前状态”卡片中标明对应服务器，并直接给出建议操作；底部英文进程输出已经收纳到默认折叠的“查看技术详情（排查问题时使用）”。切换服务器时，上一台服务器尚未返回的结果会被丢弃，当前服务器会自动重新检查，因此不会再把另一台服务器的 SSH 或登录状态显示到当前卡片。
+“当前状态”卡片标明了结果对应的服务器，并提供下一步建议。原始输出在默认折叠的“查看技术详情（排查问题时使用）”中。切换服务器时，应用会重新检查所选服务器。
 
 </details>
 
 <details>
 <summary><strong>隧道会因为网络波动突然中断吗？</strong></summary>
 
-可能。电脑网络切换、休眠、路由器或服务器重置 TCP 连接时，SSH 会退出。成功连接后，SSH Proxy Bridge 会启动独立的自动修复监控；即使关闭 GUI，它也会继续检查，条件恢复后按退避策略重建隧道。点击“停止连接”会同时停止监控和隧道。
+电脑切换网络、休眠或连接重置时，SSH 隧道可能意外中断。已启用的隧道通过代理复验后，由独立进程持续监控。关闭 GUI 后，监控仍会在网络条件恢复时尝试重建隧道。在隧道按钮上主动关闭后，监控也会停止，直到你重新启用代理。
+
+</details>
+
+<details>
+<summary><strong>为什么“远程 Codex 扩展”没有安装按钮？</strong></summary>
+
+检测到所选服务器已安装扩展后，安装方式和安装按钮会隐藏。“无法访问”表示探测到的路线无法访问 ChatGPT 账户服务。如果只验证了远程 Shell，卡片会显示“扩展访问待确认”。检测到 Codex 进程、验证其路线可达且未发现登录凭据时，卡片显示“未登录”。
 
 </details>
 
@@ -166,7 +173,7 @@ SSH-Proxy-Bridge-v0.2.8-win-x64.zip
 
 ## English summary
 
-SSH Proxy Bridge is a Windows desktop application that lets remote Linux development environments use a proxy running on the local Windows computer. It creates a managed SSH reverse tunnel and opens the selected remote folder with VS Code Remote-SSH.
+SSH Proxy Bridge is a Windows desktop application for remote Linux development. It tests Codex reachability, manages an optional SSH reverse tunnel to the Windows proxy, and opens the selected folder with VS Code Remote-SSH.
 
 ## 声明
 

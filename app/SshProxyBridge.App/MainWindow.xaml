@@ -149,18 +149,11 @@
                                 <Button x:Name="CheckDirectButton" Content="测试 Codex 直连"
                                         Style="{StaticResource SecondaryButtonStyle}"
                                         Click="CheckDirect_Click" Margin="0,0,8,6" />
-                                <Button x:Name="StartTunnelButton" Content="启动代理隧道"
+                                <Button x:Name="StartTunnelButton" Content="检查代理隧道"
                                         Style="{StaticResource SecondaryButtonStyle}"
-                                        Click="StartTunnel_Click" Margin="0,0,8,6" />
-                                <Button x:Name="StopButton" Content="停止连接"
-                                        Style="{StaticResource SecondaryButtonStyle}"
-                                        Click="Stop_Click" Margin="0,0,8,6" />
-                                <Button x:Name="DiagnosticsButton" Content="运行诊断"
-                                        Style="{StaticResource SecondaryButtonStyle}"
-                                        Click="Diagnostics_Click" Margin="0,0,8,6" />
-                                <Button x:Name="RepairButton" Content="一键修复连接"
-                                        Style="{StaticResource SecondaryButtonStyle}"
-                                        Click="Repair_Click" Margin="0,0,8,6" />
+                                        AutomationProperties.Name="{Binding Content, RelativeSource={RelativeSource Self}}"
+                                        ToolTip="管理当前服务器的代理隧道，保留现有 VS Code SSH 会话"
+                                        Click="StartTunnelButton_Click" Margin="0,0,8,6" />
                                 <Button x:Name="StatusButton" Content="刷新状态"
                                         Style="{StaticResource SecondaryButtonStyle}"
                                         Click="Status_Click" Margin="0,0,8,6" />
@@ -184,7 +177,8 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Text="远程 Codex 扩展" VerticalAlignment="Center"
                                        FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" />
-                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <StackPanel x:Name="ExtensionInstallControls" Grid.Column="1"
+                                        Orientation="Horizontal" VerticalAlignment="Center">
                                 <ComboBox x:Name="ExtensionInstallRouteBox" SelectedIndex="0" MinWidth="150"
                                           Margin="0,0,8,0" Padding="8,5" VerticalContentAlignment="Center"
                                           BorderBrush="{StaticResource BorderBrush}"

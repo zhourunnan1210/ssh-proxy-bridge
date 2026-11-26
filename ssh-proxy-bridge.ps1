@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('doctor', 'bootstrap-key', 'setup', 'start', 'check-direct', 'start-tunnel', 'repair', 'reload-vscode', 'install-codex', 'monitor', 'status', 'stop', 'uninstall')]
+    [ValidateSet('doctor', 'bootstrap-key', 'setup', 'start', 'check-direct', 'start-tunnel', 'repair', 'reload-vscode', 'install-codex', 'monitor', 'status', 'refresh', 'stop', 'uninstall')]
     [string]$Command = 'doctor',
 
     [string]$Config,
@@ -768,46 +768,65 @@ $end
     else {
         @"
 $start
-if timeout 1 bash -c '</dev/tcp/$hostName/$port' 2>/dev/null; then
-    export HTTP_PROXY='http://$hostName`:$port'
-    export HTTPS_PROXY="`$HTTP_PROXY"
-    export http_proxy="`$HTTP_PROXY"
-    export https_proxy="`$HTTPS_PROXY"
-    export NO_PROXY='localhost,127.0.0.1,::1'
-    export no_proxy="`$NO_PROXY"
-    export SSH_PROXY_BRIDGE_ROUTE='proxy'
-else
-    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
-    unset SSH_PROXY_BRIDGE_ROUTE
-fi
+export HTTP_PROXY='http://$hostName`:$port'
+export HTTPS_PROXY="`$HTTP_PROXY"
+export http_proxy="`$HTTP_PROXY"
+export https_proxy="`$HTTPS_PROXY"
+export ALL_PROXY="`$HTTP_PROXY"
+export all_proxy="`$HTTP_PROXY"
+export NO_PROXY='localhost,127.0.0.1,::1'
+export no_proxy="`$NO_PROXY"
+export SSH_PROXY_BRIDGE_ROUTE='proxy'
 $end
 "@
     }
     $script = @"
 set -eu
 file="`$HOME/.bashrc"
-touch "`$file"
-tmp=`$(mktemp)
-trap 'rm -f "`$tmp"' EXIT
-awk '
-BEGIN { skip=0 }
+if [ -L "`$file" ]; then
+    if ! resolved=`$(readlink -f -- "`$file") || [ ! -f "`$resolved" ]; then
+        printf '%s\n' 'The ~/.bashrc symlink must point to an existing regular file.' >&2
+        exit 1
+    fi
+    file="`$resolved"
+elif [ -e "`$file" ] && [ ! -f "`$file" ]; then
+    printf '%s\n' 'The ~/.bashrc path must be a regular file.' >&2
+    exit 1
+fi
+tmp=`$(mktemp "`${file%/*}/.ssh-proxy-bridge-bashrc.XXXXXX")
+trap 'rm -f -- "`$tmp"' EXIT
+if [ -f "`$file" ] && ! awk '
 {
     normalized=`$0
     sub(/\r`$/, "", normalized)
-    if (normalized == "$start") { skip=1; next }
-    if (normalized == "$end") { skip=0; next }
+    if (normalized == "$start") {
+        if (skip) { invalid=1; exit }
+        skip=1
+        next
+    }
+    if (normalized == "$end") {
+        if (!skip) { invalid=1; exit }
+        skip=0
+        next
+    }
     if (skip == 0) {
         sub(/\r`$/, "", `$0)
         print
     }
 }
-' "`$file" > "`$tmp"
+END { if (skip || invalid) exit 2 }
+' "`$file" > "`$tmp"; then
+    printf '%s\n' 'Invalid managed proxy markers in ~/.bashrc. Check the matching start and end markers.' >&2
+    exit 1
+fi
 printf '\n' >> "`$tmp"
 printf %s __BLOCK_BASE64__ | base64 -d >> "`$tmp"
 printf '\n' >> "`$tmp"
 bash -n "`$tmp"
-chmod --reference="`$file" "`$tmp" 2>/dev/null || true
-mv "`$tmp" "`$file"
+if [ -f "`$file" ]; then
+    chmod --reference="`$file" "`$tmp" 2>/dev/null || true
+fi
+mv -f -- "`$tmp" "`$file"
 trap - EXIT
 "@
     # PowerShell here-strings use CRLF on Windows. Linux shell profiles must
@@ -822,10 +841,11 @@ trap - EXIT
     if ($result.ExitCode -ne 0) {
         throw "Remote environment setup failed: $($result.Output -join ' ')"
     }
+    Write-Utf8NoBom (Get-StatePath 'application-route.intent') $Route
     Write-Pass "Remote ~/.bashrc application network route installed: $Route."
 }
 
-function Test-ManagedTunnelProcess($Configuration, $Process) {
+function Test-ManagedTunnelProcess($Configuration, $Process, [switch]$RequireCommandLine) {
     if (-not $Process -or $Process.ProcessName -ne 'ssh') {
         return $false
     }
@@ -849,6 +869,7 @@ function Test-ManagedTunnelProcess($Configuration, $Process) {
         # to an ssh.exe process owned by the current Windows session.
     }
 
+    if ($RequireCommandLine) { return $false }
     try {
         $path = [string]$Process.Path
         return -not $path -or [IO.Path]::GetFileName($path) -eq 'ssh.exe'
@@ -885,7 +906,7 @@ function Stop-Tunnel($Configuration) {
         return
     }
 
-    if (-not (Test-ManagedTunnelProcess $Configuration $process)) {
+    if (-not (Test-ManagedTunnelProcess $Configuration $process -RequireCommandLine)) {
         throw "Refusing to stop PID $($process.Id): it does not match the managed tunnel."
     }
     Stop-Process -Id $process.Id -Force
@@ -927,7 +948,7 @@ function Write-MonitorEvent([string]$Message, [string]$Level = 'INFO') {
     }
 }
 
-function Test-ManagedMonitorProcess($Process) {
+function Test-ManagedMonitorProcess($Process, [switch]$RequireCommandLine) {
     if (-not $Process -or $Process.ProcessName -notin @('powershell', 'pwsh')) {
         return $false
     }
@@ -947,7 +968,7 @@ function Test-ManagedMonitorProcess($Process) {
         # PID file lives in this profile's private runtime directory.
     }
 
-    return $true
+    return -not $RequireCommandLine
 }
 
 function Get-MonitorProcess {
@@ -979,10 +1000,42 @@ function Stop-Monitor {
         return
     }
 
+    if (-not (Test-ManagedMonitorProcess $process -RequireCommandLine)) {
+        throw "Refusing to stop PID $($process.Id): it does not match the managed tunnel monitor."
+    }
     Stop-Process -Id $process.Id -Force
     Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
     Write-MonitorEvent "Automatic repair monitor stopped (PID $($process.Id))."
     Write-Pass "Stopped automatic repair monitor PID $($process.Id)."
+}
+
+function Get-TunnelIntent {
+    $path = Get-StatePath 'tunnel.intent'
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $intent = [IO.File]::ReadAllText($path).Trim()
+        if ($intent -cin @('enabled', 'disabled')) { return $intent }
+    }
+    return 'unspecified'
+}
+
+function Set-TunnelIntent([ValidateSet('enabled', 'disabled')] [string]$Intent) {
+    Write-Utf8NoBom (Get-StatePath 'tunnel.intent') $Intent
+}
+
+function Get-ManagedTunnelSnapshot($Configuration) {
+    $intent = Get-TunnelIntent
+    $tunnel = Get-TunnelProcess $Configuration
+    $monitor = Get-MonitorProcess
+    $expected = $intent -eq 'enabled' -or ($intent -eq 'unspecified' -and ($tunnel -or $monitor))
+    $state = if ($tunnel) { 'running' } elseif ($expected) { 'interrupted' } else { 'stopped' }
+    return [pscustomobject]@{ Intent = $intent; Tunnel = $tunnel; Monitor = $monitor; Expected = $expected; State = $state }
+}
+
+function Write-ManagedTunnelStatus($Snapshot) {
+    Write-Host "Tunnel state: $($Snapshot.State)"
+    Write-Host "Tunnel intent: $($Snapshot.Intent)"
+    Write-Host "Tunnel: $(if ($Snapshot.Tunnel) { "running (PID $($Snapshot.Tunnel.Id))" } else { 'stopped' })"
+    Write-Host "Auto repair: $(if ($Snapshot.Monitor) { "running (PID $($Snapshot.Monitor.Id))" } else { 'stopped' })"
 }
 
 function Enter-RepairLock([int]$TimeoutSeconds = 15) {
@@ -1004,9 +1057,41 @@ function Enter-RepairLock([int]$TimeoutSeconds = 15) {
     throw 'Another tunnel repair operation is still running.'
 }
 
-function Repair-Tunnel($Configuration) {
+function Get-RemoteTunnelListenerState($Configuration) {
+    $hostBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$Configuration.ssh.remoteProxyHost))
+    $port = [int]$Configuration.ssh.remoteProxyPort
+    $probe = @'
+host=$(printf %s __HOST_BASE64__ | base64 -d)
+if ! command -v timeout >/dev/null 2>&1; then
+    printf 'SSH_PROXY_BRIDGE_REMOTE_LISTENER:unknown\n'
+elif timeout 2 bash -c 'exec 3<>"/dev/tcp/$1/$2"' bash "$host" __PORT__ 2>/dev/null; then
+    printf 'SSH_PROXY_BRIDGE_REMOTE_LISTENER:listening\n'
+elif [ "$?" -eq 1 ]; then
+    printf 'SSH_PROXY_BRIDGE_REMOTE_LISTENER:missing\n'
+else
+    printf 'SSH_PROXY_BRIDGE_REMOTE_LISTENER:unknown\n'
+fi
+'@
+    $probe = $probe.Replace('__HOST_BASE64__', $hostBase64).Replace('__PORT__', [string]$port)
+    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe.Replace("`r", '')))
+    try {
+        $result = Invoke-Ssh $Configuration "printf %s $payload | base64 -d | bash" -UseAlias
+        if ($result.ExitCode -eq 0) {
+            $marker = $result.Output | Where-Object { $_ -cmatch '^SSH_PROXY_BRIDGE_REMOTE_LISTENER:(listening|missing|unknown)$' } |
+                Select-Object -Last 1
+            if ($marker) { return ($marker -split ':', 2)[1] }
+        }
+    }
+    catch {
+        # An unavailable SSH session cannot prove the listener is missing.
+    }
+    return 'unknown'
+}
+
+function Repair-Tunnel($Configuration, [switch]$RespectTunnelIntent) {
     $repairLock = Enter-RepairLock
     try {
+        if ($RespectTunnelIntent -and (Get-TunnelIntent) -eq 'disabled') { return $null }
         if (-not (Test-TcpPort ([string]$Configuration.proxy.host) ([int]$Configuration.proxy.port) 1500)) {
             throw "The Windows proxy is not listening at $($Configuration.proxy.host):$($Configuration.proxy.port)."
         }
@@ -1019,8 +1104,15 @@ function Repair-Tunnel($Configuration) {
                 return $existing
             }
 
-            Write-MonitorEvent (
-                "Tunnel process PID $($existing.Id) was alive but the remote proxy probe failed; rebuilding it.") 'WARN'
+            $listener = Get-RemoteTunnelListenerState $Configuration
+            if ($listener -ne 'missing') {
+                $message = "The managed tunnel is still running (PID $($existing.Id)); Codex proxy validation failed (remote listener: $listener)."
+                Write-MonitorEvent $message 'WARN'
+                Write-Warn $message
+                return $existing
+            }
+
+            Write-MonitorEvent "The remote listener for tunnel PID $($existing.Id) is missing; rebuilding the tunnel." 'WARN'
             Stop-Tunnel $Configuration
         }
         else {
@@ -1033,8 +1125,12 @@ function Repair-Tunnel($Configuration) {
 
         $process = Start-Tunnel $Configuration
         if (-not (Test-RemoteProxy $Configuration)) {
-            Stop-Tunnel $Configuration
-            throw 'The rebuilt SSH tunnel did not pass the remote proxy probe.'
+            $process = Get-TunnelProcess $Configuration
+            if (-not $process) { throw 'The rebuilt SSH tunnel exited before validation completed.' }
+            $message = "The rebuilt SSH tunnel is running (PID $($process.Id)); Codex proxy validation has not passed yet."
+            Write-MonitorEvent $message 'WARN'
+            Write-Warn $message
+            return $process
         }
 
         Write-MonitorEvent "Tunnel repair succeeded with PID $($process.Id)."
@@ -1051,6 +1147,7 @@ function Repair-Tunnel($Configuration) {
 }
 
 function Start-Monitor($Configuration) {
+    if ((Get-TunnelIntent) -eq 'disabled') { return $null }
     $existing = Get-MonitorProcess
     if ($existing) {
         Write-Pass "Automatic tunnel repair is already running (PID $($existing.Id))."
@@ -1104,11 +1201,11 @@ function Invoke-TunnelMonitor($Configuration) {
     $failureCount = 0
     $nextRemoteProbe = [DateTime]::MinValue
     try {
-        while ($true) {
+        while ((Get-TunnelIntent) -ne 'disabled') {
             try {
                 $tunnel = Get-TunnelProcess $Configuration
                 if (-not $tunnel -or [DateTime]::UtcNow -ge $nextRemoteProbe) {
-                    $null = Repair-Tunnel $Configuration
+                    $null = Repair-Tunnel $Configuration -RespectTunnelIntent
                     $nextRemoteProbe = [DateTime]::UtcNow.AddSeconds(60)
                 }
                 $failureCount = 0
@@ -1174,26 +1271,82 @@ function Start-Tunnel($Configuration) {
     return $process
 }
 
+function Enable-ManagedTunnel($Configuration, [switch]$InstallAlias) {
+    $lock = Enter-RepairLock
+    try {
+        Set-TunnelIntent 'enabled'
+        Start-ProxyIfNeeded $Configuration
+        $existing = Get-TunnelProcess $Configuration
+        if (-not $existing) {
+            if ($InstallAlias) { Install-SshConfig $Configuration }
+            $null = Start-Tunnel $Configuration
+        }
+        if (-not (Test-RemoteProxy $Configuration)) { return 'unverified' }
+
+        $null = Start-Monitor $Configuration
+        if ($existing) { return 'existing' }
+        return 'ready'
+    }
+    finally {
+        $lock.Dispose()
+    }
+}
+
+function Disable-ManagedTunnel($Configuration) {
+    Set-TunnelIntent 'disabled'
+    Stop-Monitor
+    $lock = Enter-RepairLock
+    try {
+        # Reassert the user's choice after any concurrent repair or start finishes.
+        Set-TunnelIntent 'disabled'
+        if (Get-MonitorProcess) { Stop-Monitor }
+        Stop-Tunnel $Configuration
+    }
+    finally {
+        $lock.Dispose()
+    }
+}
+
 function Test-RemoteDirectCodex($Configuration, [switch]$Quiet, [switch]$ReportProbeResult) {
     $script = @'
 set -u
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+check_account=__CHECK_ACCOUNT__
 target='https://chatgpt.com/backend-api/codex/responses'
 code=''
+response_attempt=''
 for attempt in 1 2; do
-    code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    code=$(curl -q -sS -o /dev/null -w '%{http_code}' \
         --noproxy '*' --connect-timeout 6 --max-time 10 \
         -X POST -H 'content-type: application/json' --data '{}' \
         "$target" 2>/dev/null || true)
     if [ "$code" = '401' ]; then
-        printf 'CODEX_DIRECT_OK:%s:attempt-%s\n' "$code" "$attempt"
-        exit 0
+        response_attempt=$attempt
+        break
     fi
     [ "$attempt" = '1' ] && sleep 1
 done
-printf 'CODEX_DIRECT_FAILED:%s\n' "${code:-none}"
-exit 1
+if [ "$check_account" = '1' ]; then
+    account_code=$(curl -q -sS -o /dev/null -w '%{http_code}' --proto '=https' \
+        --noproxy '*' --connect-timeout 3 --max-time 5 \
+        'https://chatgpt.com/backend-api/wham/accounts/check' 2>/dev/null || true)
+    case "$account_code" in
+        401) printf 'CODEX_DIRECT_ACCOUNT:reachable:401\n' ;;
+        [1-5][0-9][0-9]) printf 'CODEX_DIRECT_ACCOUNT:unreachable:%s\n' "$account_code" ;;
+        *) account_code=none; printf 'CODEX_DIRECT_ACCOUNT:unreachable:none\n' ;;
+    esac
+    if [ -n "$response_attempt" ] && [ "$account_code" != '401' ]; then
+        printf 'CODEX_DIRECT_FAILED:%s\n' "$account_code"
+        exit 1
+    fi
+fi
+if [ -z "$response_attempt" ]; then
+    printf 'CODEX_DIRECT_FAILED:%s\n' "${code:-none}"
+    exit 1
+fi
+printf 'CODEX_DIRECT_OK:401:attempt-%s\n' "$response_attempt"
 '@
+    $script = $script.Replace('__CHECK_ACCOUNT__', $(if ($ReportProbeResult) { '1' } else { '0' }))
     $scriptBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
     $command = "printf %s $scriptBase64 | base64 -d | bash"
@@ -1207,6 +1360,10 @@ exit 1
             throw "The SSH command did not return a direct Codex probe result (exit $($result.ExitCode))."
         }
         Write-Host $marker
+        $accountMarker = $result.Output | Where-Object {
+            $_ -cmatch '^CODEX_DIRECT_ACCOUNT:(?:reachable:401|unreachable:(?:[0-9]{3}|none))$'
+        } | Select-Object -Last 1
+        if ($accountMarker) { Write-Host $accountMarker }
     }
     $ok = $result.ExitCode -eq 0 -and $marker -match '^CODEX_DIRECT_OK:'
     if (-not $Quiet) {
@@ -1235,8 +1392,8 @@ set -u
 proxy=$(printf %s __PROXY_BASE64__ | base64 -d)
 codex_code=''
 for attempt in 1 2; do
-    codex_code=$(curl -sS -o /dev/null -w '%{http_code}' \
-        --connect-timeout 6 --max-time 10 --proxy "$proxy" \
+    codex_code=$(curl -q -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 6 --max-time 10 --noproxy '' --proxy "$proxy" \
         -X POST -H 'content-type: application/json' --data '{}' \
         'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
     if [ "$codex_code" = '401' ]; then
@@ -1273,6 +1430,131 @@ function Test-RemoteApplicationNetwork(
 set -u
 expected=$(printf %s __EXPECTED_BASE64__ | base64 -d)
 require_active=__REQUIRE_ACTIVE__
+route=''
+shell_proxy=''
+total=0
+ready=0
+processes_checked=0
+account_process_route=''
+
+codex_account_bypasses_proxy() {
+    local entry
+    local -a entries
+    IFS=, read -ra entries <<< "$1"
+    for entry in "${entries[@]}"; do
+        entry=${entry//[[:space:]]/}
+        entry=${entry,,}
+        case "$entry" in
+            \*|chatgpt.com|.chatgpt.com|chatgpt.com:443|.chatgpt.com:443|com|.com) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+codex_account_proxy_is_supported() {
+    # The managed reverse proxy is loopback HTTP. Never send credentials from an existing process proxy URL.
+    [[ "$1" =~ ^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]{1,5}/?$ ]]
+}
+
+inspect_codex_processes() {
+    local proc executable command_line setting process_route process_proxy candidate
+    local https_proxy_lc all_proxy_uc all_proxy_lc http_proxy_set no_proxy_uc no_proxy_lc
+    if [ "$processes_checked" = '1' ]; then return; fi
+    processes_checked=1
+    for proc in /proc/[0-9]*; do
+        [ -O "$proc" ] && [ -r "$proc/cmdline" ] && [ -r "$proc/environ" ] || continue
+        IFS= read -r -d '' executable 2>/dev/null <"$proc/cmdline" || continue
+        case "$executable" in
+            */openai.chatgpt-*/*/codex) ;;
+            *) continue ;;
+        esac
+        command_line=$(tr '\0' ' ' 2>/dev/null <"$proc/cmdline" || true)
+        case " $command_line" in *' app-server '*) ;; *) continue ;; esac
+        process_route=''; process_proxy=''; https_proxy_lc=''; all_proxy_uc=''; all_proxy_lc=''
+        http_proxy_set=''; no_proxy_uc=''; no_proxy_lc=''
+        while IFS= read -r -d '' setting; do
+            case "$setting" in
+                SSH_PROXY_BRIDGE_ROUTE=*) process_route=${setting#*=} ;;
+                HTTPS_PROXY=*) process_proxy=${setting#*=} ;;
+                https_proxy=*) https_proxy_lc=${setting#*=} ;;
+                ALL_PROXY=*) all_proxy_uc=${setting#*=} ;;
+                all_proxy=*) all_proxy_lc=${setting#*=} ;;
+                HTTP_PROXY=?*|http_proxy=?*) http_proxy_set=1 ;;
+                NO_PROXY=*) no_proxy_uc=${setting#*=} ;;
+                no_proxy=*) no_proxy_lc=${setting#*=} ;;
+            esac
+        done 2>/dev/null <"$proc/environ"
+        total=$((total + 1))
+        case "$route" in
+            direct)
+                [ "$process_route" = 'direct' ] && [ -z "$process_proxy" ] && ready=$((ready + 1))
+                ;;
+            proxy)
+                [ "$process_route" = 'proxy' ] && [ "$process_proxy" = "$expected" ] && ready=$((ready + 1))
+                ;;
+        esac
+
+        candidate=${process_proxy:-${https_proxy_lc:-${all_proxy_uc:-$all_proxy_lc}}}
+        if codex_account_bypasses_proxy "${no_proxy_uc:-$no_proxy_lc}"; then
+            candidate=direct
+        elif [ -z "$candidate" ]; then
+            if [ -n "$http_proxy_set" ]; then candidate=unknown; else candidate=direct; fi
+        elif ! codex_account_proxy_is_supported "$candidate"; then
+            candidate=unknown
+        fi
+        if [ -z "$account_process_route" ]; then
+            account_process_route=$candidate
+        elif [ "$account_process_route" != "$candidate" ]; then
+            account_process_route=unknown
+        fi
+    done
+}
+
+emit_codex_account_access() {
+    local chosen code account_route origin=unknown
+    local -a network_args
+    inspect_codex_processes
+    if [ "$require_active" = '1' ] && [ "$total" = '0' ]; then
+        printf 'CODEX_ACCOUNT_ACCESS:unknown:unknown:none:unknown\n'
+        return
+    fi
+    chosen=$account_process_route
+    if [ -n "$chosen" ]; then
+        origin=process
+    else
+        case "$route" in
+            direct) if [ -z "$shell_proxy" ]; then chosen=direct; fi ;;
+            proxy) if codex_account_proxy_is_supported "$shell_proxy"; then chosen=$shell_proxy; fi ;;
+        esac
+        if [ -n "$chosen" ]; then origin=shell; fi
+    fi
+    if [ "$chosen" = direct ]; then
+        account_route=direct
+        network_args=(--noproxy '*')
+    elif codex_account_proxy_is_supported "$chosen"; then
+        account_route=proxy
+        network_args=(--noproxy '' --proxy "$chosen")
+    else
+        printf 'CODEX_ACCOUNT_ACCESS:unknown:unknown:none:%s\n' "$origin"
+        return
+    fi
+
+    # The public endpoint answers with 401 when contacted without credentials; this checks transport only.
+    # -q, first, disables ~/.curlrc (which might otherwise supply user headers or credentials).
+    if ! command -v curl >/dev/null; then
+        printf 'CODEX_ACCOUNT_ACCESS:unknown:%s:none:%s\n' "$account_route" "$origin"
+        return
+    fi
+    code=$(curl -q -sS -o /dev/null -w '%{http_code}' --proto '=https' \
+        --connect-timeout 3 --max-time 5 "${network_args[@]}" \
+        'https://chatgpt.com/backend-api/wham/accounts/check' 2>/dev/null || true)
+    case "$code" in
+        401) printf 'CODEX_ACCOUNT_ACCESS:reachable:%s:401:%s\n' "$account_route" "$origin" ;;
+        [1-5][0-9][0-9]) printf 'CODEX_ACCOUNT_ACCESS:unreachable:%s:%s:%s\n' "$account_route" "$code" "$origin" ;;
+        *) printf 'CODEX_ACCOUNT_ACCESS:unreachable:%s:none:%s\n' "$account_route" "$origin" ;;
+    esac
+}
+trap emit_codex_account_access EXIT
 if ! bash -n "$HOME/.bashrc" 2>/dev/null; then
     printf 'APPLICATION_NETWORK_BASHRC_INVALID\n'
     exit 1
@@ -1293,7 +1575,7 @@ case "$route" in
         unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
         direct_code=''
         for attempt in 1 2; do
-            direct_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            direct_code=$(curl -q -sS -o /dev/null -w '%{http_code}' \
                 --noproxy '*' --connect-timeout 6 --max-time 10 \
                 -X POST -H 'content-type: application/json' --data '{}' \
                 'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
@@ -1312,8 +1594,8 @@ case "$route" in
         fi
         proxy_code=''
         for attempt in 1 2; do
-            proxy_code=$(curl -sS -o /dev/null -w '%{http_code}' \
-                --connect-timeout 6 --max-time 10 --proxy "$expected" \
+            proxy_code=$(curl -q -sS -o /dev/null -w '%{http_code}' \
+                --connect-timeout 6 --max-time 10 --noproxy '' --proxy "$expected" \
                 -X POST -H 'content-type: application/json' --data '{}' \
                 'https://chatgpt.com/backend-api/codex/responses' 2>/dev/null || true)
             [ "$proxy_code" = '401' ] && break
@@ -1323,38 +1605,21 @@ case "$route" in
             printf 'APPLICATION_NETWORK_PROXY_FAILED:%s\n' "${proxy_code:-none}"
             exit 1
         fi
+        if awk '
+            $0 == "# >>> codex-remote-proxy >>>" { managed=1; next }
+            $0 == "# <<< codex-remote-proxy <<<" { managed=0; next }
+            managed && /^if timeout 1 bash -c / && /<\/dev\/tcp\// { guarded=1 }
+            END { exit !guarded }
+        ' "$HOME/.bashrc"; then
+            printf 'SSH_PROXY_BRIDGE_MANAGED_PROXY_STYLE:guarded\n'
+        fi
         ;;
     *)
         printf 'APPLICATION_NETWORK_ROUTE_MISSING\n'
         exit 1
         ;;
 esac
-total=0
-ready=0
-extension_prefix="$HOME/.vscode-server/extensions/openai.chatgpt-"
-for proc in /proc/[0-9]*; do
-    [ -r "$proc/cmdline" ] && [ -r "$proc/environ" ] || continue
-    command_line=$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)
-    case "$command_line" in
-        *"$extension_prefix"*) ;;
-        *) continue ;;
-    esac
-    total=$((total + 1))
-    process_route=$(tr '\0' '\n' <"$proc/environ" |
-        sed -n 's/^SSH_PROXY_BRIDGE_ROUTE=//p' | head -n 1)
-    process_proxy=$(tr '\0' '\n' <"$proc/environ" |
-        sed -n 's/^HTTPS_PROXY=//p' | head -n 1)
-    case "$route" in
-        direct)
-            [ "$process_route" = 'direct' ] && [ -z "$process_proxy" ] &&
-                ready=$((ready + 1))
-            ;;
-        proxy)
-            [ "$process_route" = 'proxy' ] && [ "$process_proxy" = "$expected" ] &&
-                ready=$((ready + 1))
-            ;;
-    esac
-done
+inspect_codex_processes
 if [ "$total" -eq 0 ]; then
     if [ "$require_active" = '1' ]; then
         printf 'APPLICATION_NETWORK_CODEX_NOT_RUNNING:%s\n' "$route"
@@ -1374,7 +1639,12 @@ printf 'APPLICATION_NETWORK_READY:%s:%s/%s\n' "$route" "$ready" "$total"
     $scriptBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
     $command = "printf %s $scriptBase64 | base64 -d | bash"
+    $script:LastCodexAccountAccessMarker = 'CODEX_ACCOUNT_ACCESS:unknown:unknown:none:unknown'
     $result = Invoke-Ssh $Configuration $command -UseAlias
+    $accountMarker = $result.Output | Where-Object {
+        $_ -cmatch '^CODEX_ACCOUNT_ACCESS:(reachable|unreachable|unknown):(direct|proxy|unknown):([0-9]{3}|none)(?::(?:process|shell|unknown))?$'
+    } | Select-Object -Last 1
+    if ($accountMarker) { $script:LastCodexAccountAccessMarker = $accountMarker }
     $marker = (($result.Output | Where-Object {
                 $_ -match '^APPLICATION_NETWORK_'
             } | Select-Object -First 1) -as [string])
@@ -1382,6 +1652,7 @@ printf 'APPLICATION_NETWORK_READY:%s:%s/%s\n' "$route" "$ready" "$total"
     $ok = $result.ExitCode -eq 0 -and
         $marker -match '^APPLICATION_NETWORK_READY:(direct|proxy):'
     $script:LastApplicationNetworkMarker = if ($marker) { $marker } else { 'APPLICATION_NETWORK_CHECK_FAILED' }
+    $script:LastManagedProxyGuarded = $result.Output -ccontains 'SSH_PROXY_BRIDGE_MANAGED_PROXY_STYLE:guarded'
     $script:LastApplicationNetworkReason = if ($marker -match '^APPLICATION_NETWORK_READY:') {
         'ready'
     }
@@ -1418,6 +1689,7 @@ printf 'APPLICATION_NETWORK_READY:%s:%s/%s\n' "$route" "$ready" "$total"
     if (-not $SuppressMarkers) {
         Write-Host "Application network marker: $($script:LastApplicationNetworkMarker)"
         Write-Host "Application network reason: $($script:LastApplicationNetworkReason)"
+        Write-Host $script:LastCodexAccountAccessMarker
     }
     if (-not $Quiet) {
         if ($ok) {
@@ -2231,6 +2503,127 @@ function Remove-SshConfig($Configuration) {
     Write-Pass "Removed managed SSH alias: $alias"
 }
 
+function Write-ApplicationNetworkStatus([bool]$Ready) {
+    Write-Host "Application network marker: $($script:LastApplicationNetworkMarker)"
+    Write-Host "Application network reason: $($script:LastApplicationNetworkReason)"
+    Write-Host "Application network: $(if ($Ready) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
+    Write-Host $script:LastCodexAccountAccessMarker
+}
+
+function Restore-ManagedApplicationRoute($Configuration, [bool]$TunnelExpected) {
+    $route = ''
+    if ($script:LastApplicationNetworkMarker -cmatch '^APPLICATION_NETWORK_SHELL_MISMATCH:(direct|proxy)$') {
+        $route = $Matches[1]
+    }
+    elseif ($script:LastApplicationNetworkReason -eq 'shell-route-missing') {
+        $path = Get-StatePath 'application-route.intent'
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $route = [IO.File]::ReadAllText($path).Trim()
+        }
+    }
+
+    $routeAvailable = switch -CaseSensitive ($route) {
+        'direct' { Test-RemoteDirectCodex $Configuration -Quiet }
+        'proxy' { $TunnelExpected -and (Get-TunnelIntent) -ne 'disabled' -and (Test-RemoteProxy $Configuration) }
+        default { $false }
+    }
+    if (-not $routeAvailable) { return $false }
+
+    Install-RemoteProxyEnvironment $Configuration $route
+    return $true
+}
+
+function Invoke-ConnectionStatus($Configuration, [switch]$RepairWhenReady) {
+    $loginLabel = if (Test-PasswordGatewayMode $Configuration) { 'SSH password gateway login' } else { 'SSH key login' }
+    $sshLoginOk = $false
+    $sshLoginError = ''
+    try {
+        $sshLoginOk = Test-SshLogin $Configuration -Quiet
+    }
+    catch {
+        $sshLoginError = $_.Exception.Message
+    }
+
+    $applicationNetworkOk = $false
+    $changed = $false
+    $repairFailed = $false
+    if ($sshLoginOk) {
+        $applicationNetworkOk = Test-RemoteApplicationNetwork $Configuration -Quiet -SuppressMarkers
+        if ($RepairWhenReady) {
+            $snapshot = Get-ManagedTunnelSnapshot $Configuration
+            try {
+                if ($snapshot.Expected) {
+                    if (-not $snapshot.Tunnel -or $script:LastApplicationNetworkReason -eq 'proxy-unreachable') {
+                        Start-ProxyIfNeeded $Configuration
+                        $tunnel = Repair-Tunnel $Configuration -RespectTunnelIntent
+                        if ($tunnel) {
+                            $changed = -not $snapshot.Tunnel -or $tunnel.Id -ne $snapshot.Tunnel.Id
+                            $applicationNetworkOk = Test-RemoteApplicationNetwork $Configuration -Quiet -SuppressMarkers
+                        }
+                    }
+                    if (-not $snapshot.Monitor -and (Get-TunnelProcess $Configuration)) {
+                        if (Start-Monitor $Configuration) { $changed = $true }
+                    }
+                }
+
+                $upgradeGuardedProxy = $applicationNetworkOk -and $script:LastApplicationNetworkRoute -eq 'proxy' -and
+                    $script:LastManagedProxyGuarded -and $snapshot.Expected -and (Get-TunnelIntent) -ne 'disabled'
+                if ($upgradeGuardedProxy) {
+                    Install-RemoteProxyEnvironment $Configuration 'proxy'
+                    $changed = $true
+                    $applicationNetworkOk = Test-RemoteApplicationNetwork $Configuration -Quiet -SuppressMarkers
+                }
+                elseif (-not $applicationNetworkOk -and (Restore-ManagedApplicationRoute $Configuration $snapshot.Expected)) {
+                    $changed = $true
+                    $applicationNetworkOk = Test-RemoteApplicationNetwork $Configuration -Quiet -SuppressMarkers
+                }
+            }
+            catch {
+                $repairFailed = $true
+                Write-Warn "Automatic repair could not finish: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if ($RepairWhenReady) { Write-Host 'REFRESH_FINAL_STATUS' }
+    $proxyOk = Test-TcpPort ([string]$Configuration.proxy.host) ([int]$Configuration.proxy.port)
+    Write-Host "Proxy:  $(if ($proxyOk) { 'running' } else { 'not ready' })"
+    $finalSnapshot = Get-ManagedTunnelSnapshot $Configuration
+    Write-ManagedTunnelStatus $finalSnapshot
+    Write-SshLoginMarkers
+    Write-Host "$loginLabel`: $(if ($sshLoginOk) { 'ready' } else { 'not ready' })"
+
+    if (-not $sshLoginOk) {
+        Write-Host 'Connection diagnosis: ssh-not-ready'
+        Write-Host 'Application network marker: APPLICATION_NETWORK_SKIPPED:ssh-not-ready'
+        Write-Host 'Application network reason: ssh-not-ready'
+        Write-Host 'Application network: unknown'
+        Write-Host 'Codex authentication: unknown'
+        Write-Host 'CODEX_ACCOUNT_ACCESS:unknown:unknown:none:unknown'
+        Write-RemoteCodexExtensionStatus $null
+        if ($sshLoginError) {
+            Write-Fail "SSH login check failed: $sshLoginError"
+        }
+        else {
+            Write-Fail 'SSH login is not ready. Check the server address, port, saved credential, and SSH key initialization.'
+        }
+        if ($RepairWhenReady) { Write-Host 'Refresh result: attention' }
+        return 1
+    }
+
+    Write-ApplicationNetworkStatus $applicationNetworkOk
+    $null = Test-RemoteCodexAuthentication $Configuration -Quiet -IncludeExtensionStatus
+    Write-Host "Codex authentication: $script:LastRemoteCodexAuthenticationState"
+    if ($RepairWhenReady) {
+        $result = if ($repairFailed -or $finalSnapshot.State -eq 'interrupted' -or
+            (-not $applicationNetworkOk -and $finalSnapshot.Intent -ne 'disabled')) { 'attention' }
+        elseif ($changed) { 'repaired' }
+        else { 'checked' }
+        Write-Host "Refresh result: $result"
+    }
+    return 0
+}
+
 $configuration = Read-Configuration $Config
 $profileIdProperty = $configuration.PSObject.Properties['profileId']
 if ($profileIdProperty -and -not [string]::IsNullOrWhiteSpace([string]$profileIdProperty.Value)) {
@@ -2270,23 +2663,22 @@ try {
             }
         }
         'start-tunnel' {
-            Start-ProxyIfNeeded $configuration
-            $existing = Get-TunnelProcess $configuration
-            if ($existing) {
-                Write-Pass "SSH tunnel is already running (PID $($existing.Id))."
-                Write-Host 'Tunnel start result: existing'
-                break
+            try {
+                $result = Enable-ManagedTunnel $configuration -InstallAlias
+                if ($result -eq 'unverified') {
+                    Write-Warn 'The SSH tunnel is running, but the Codex proxy probe failed.'
+                    Write-Host 'Tunnel start result: unverified'
+                    break
+                }
+                Install-RemoteProxyEnvironment $configuration 'proxy'
+                $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet -SuppressMarkers
+                Write-ApplicationNetworkStatus $applicationNetworkOk
+                $null = Test-RemoteCodexAuthentication $configuration -Quiet -IncludeExtensionStatus
+                Write-Host "Codex authentication: $script:LastRemoteCodexAuthenticationState"
+                Write-Host "Tunnel start result: $result"
             }
-
-            Install-SshConfig $configuration
-            $null = Start-Tunnel $configuration
-            if (Test-RemoteProxy $configuration) {
-                $null = Start-Monitor $configuration
-                Write-Host 'Tunnel start result: ready'
-            }
-            else {
-                Write-Warn 'The SSH tunnel was left running. Automatic repair was not started because the Codex proxy probe failed.'
-                Write-Host 'Tunnel start result: unverified'
+            finally {
+                Write-ManagedTunnelStatus (Get-ManagedTunnelSnapshot $configuration)
             }
         }
         'start' {
@@ -2307,15 +2699,13 @@ try {
                 Write-Pass 'Server direct route selected; the Windows proxy tunnel is not required.'
             }
             else {
-                Start-ProxyIfNeeded $configuration
-                $null = Start-Tunnel $configuration
-                if (-not (Test-RemoteProxy $configuration)) {
+                if ((Enable-ManagedTunnel $configuration) -eq 'unverified') {
                     throw 'The SSH tunnel is running, but remote proxy validation failed.'
                 }
-                $null = Start-Monitor $configuration
                 Install-RemoteProxyEnvironment $configuration 'proxy'
                 Write-Pass 'Windows proxy tunnel fallback selected.'
             }
+            Write-ManagedTunnelStatus (Get-ManagedTunnelSnapshot $configuration)
             Start-VsCode $configuration
             $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
             Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
@@ -2343,12 +2733,16 @@ try {
                 Write-Pass 'The server direct route is healthy; tunnel repair was not required.'
             }
             else {
+                Set-TunnelIntent 'enabled'
                 Start-ProxyIfNeeded $configuration
-                $null = Repair-Tunnel $configuration
+                if (-not (Repair-Tunnel $configuration -RespectTunnelIntent)) {
+                    throw 'The SSH tunnel was disabled while repair was running.'
+                }
                 $null = Start-Monitor $configuration
                 Install-RemoteProxyEnvironment $configuration 'proxy'
                 Write-Pass 'Tunnel repair and automatic monitoring are ready.'
             }
+            Write-ManagedTunnelStatus (Get-ManagedTunnelSnapshot $configuration)
             $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
             Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
             $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
@@ -2381,9 +2775,7 @@ try {
                     break
                 }
             }
-            Write-Host "Application network marker: $($script:LastApplicationNetworkMarker)"
-            Write-Host "Application network reason: $($script:LastApplicationNetworkReason)"
-            Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
+            Write-ApplicationNetworkStatus $applicationNetworkOk
             $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
             if (-not $applicationNetworkOk) {
@@ -2398,57 +2790,26 @@ try {
             Invoke-TunnelMonitor $configuration
         }
         'status' {
-            $proxyOk = Test-TcpPort ([string]$configuration.proxy.host) ([int]$configuration.proxy.port)
-            $tunnel = Get-TunnelProcess $configuration
-            $monitor = Get-MonitorProcess
-            Write-Host "Proxy:  $(if ($proxyOk) { 'running' } else { 'not ready' })"
-            Write-Host "Tunnel: $(if ($tunnel) { "running (PID $($tunnel.Id))" } else { 'stopped' })"
-            Write-Host "Auto repair: $(if ($monitor) { "running (PID $($monitor.Id))" } else { 'stopped' })"
-
-            $loginLabel = if (Test-PasswordGatewayMode $configuration) { 'SSH password gateway login' } else { 'SSH key login' }
-            $sshLoginOk = $false
-            $sshLoginError = ''
-            try {
-                $sshLoginOk = Test-SshLogin $configuration -Quiet
-            }
-            catch {
-                $sshLoginError = $_.Exception.Message
-            }
-            Write-SshLoginMarkers
-            Write-Host "$loginLabel`: $(if ($sshLoginOk) { 'ready' } else { 'not ready' })"
-
-            if (-not $sshLoginOk) {
-                Write-Host 'Connection diagnosis: ssh-not-ready'
-                Write-Host 'Application network marker: APPLICATION_NETWORK_SKIPPED:ssh-not-ready'
-                Write-Host 'Application network reason: ssh-not-ready'
-                Write-Host 'Application network: unknown'
-                Write-Host 'Codex authentication: unknown'
-                Write-RemoteCodexExtensionStatus $null
-                if ($sshLoginError) {
-                    Write-Fail "SSH login check failed: $sshLoginError"
-                }
-                else {
-                    Write-Fail 'SSH login is not ready. Check the server address, port, saved credential, and SSH key initialization.'
-                }
-                exit 1
-            }
-
-            $null = Test-RemoteCodexAuthentication $configuration -Quiet -IncludeExtensionStatus
-            $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
-            Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
-            Write-Host "Codex authentication: $script:LastRemoteCodexAuthenticationState"
+            exit (Invoke-ConnectionStatus $configuration)
+        }
+        'refresh' {
+            exit (Invoke-ConnectionStatus $configuration -RepairWhenReady)
         }
         'stop' {
-            Stop-Monitor
-            Stop-Tunnel $configuration
+            try {
+                Disable-ManagedTunnel $configuration
+            }
+            finally {
+                Write-ManagedTunnelStatus (Get-ManagedTunnelSnapshot $configuration)
+            }
         }
         'uninstall' {
             if (-not $Force) {
                 $answer = Read-Host 'Remove managed SSH and remote proxy configuration? Type YES to continue'
                 if ($answer -ne 'YES') { Write-Warn 'Uninstall cancelled.'; return }
             }
-            Stop-Monitor
-            Stop-Tunnel $configuration
+            Disable-ManagedTunnel $configuration
+            Remove-Item -LiteralPath (Get-StatePath 'application-route.intent') -Force -ErrorAction SilentlyContinue
             Remove-SshConfig $configuration
             if (Test-SshLogin $configuration -Quiet) {
                 $start = '# >>> codex-remote-proxy >>>'
