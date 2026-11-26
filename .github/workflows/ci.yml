@@ -65,6 +65,10 @@ jobs:
         shell: pwsh
         run: .\scripts\tests\test-codex-extension-status.ps1
 
+      - name: Check remote Codex home preparation
+        shell: pwsh
+        run: .\scripts\tests\test-codex-home.ps1
+
       - name: Check Codex account service and process route
         shell: pwsh
         run: .\scripts\tests\test-codex-account-access.ps1

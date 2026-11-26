@@ -9,7 +9,8 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile([IO.Path]::GetFullPath($ScriptPath), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw $errors[0].Message }
 foreach ($name in @('Get-CodexExtensionProxyUrl', 'Get-CodexExtensionServerScript', 'Get-CodexExtensionGalleryUrl', 'Save-CodexExtensionVsix',
-    'Assert-CodexExtensionSshResult', 'Get-RemoteCodexAuthenticationScript', 'Write-RemoteCodexExtensionStatus', 'Install-CodexExtension')) {
+    'Assert-CodexExtensionSshResult', 'Get-RemoteCodexAuthenticationScript',
+    'Get-RemoteCodexHomeScript', 'Write-RemoteCodexHomeStatus', 'Write-RemoteCodexExtensionStatus', 'Install-CodexExtension')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name

@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<Guid, ExtensionInstallDisplay> _extensionInstallDisplays = new();
     private readonly Dictionary<Guid, ExtensionServerStatus> _extensionServerStatuses = new();
     private readonly Dictionary<Guid, CodexAccountAccess> _codexAccountAccess = new();
+    private readonly Dictionary<Guid, string> _codexHomeStatuses = new();
     private readonly Dictionary<Guid, string> _tunnelStates = new();
     private const string UnknownExtensionServerStatus = "无法确认服务器安装和登录状态";
     private bool _operationInProgress;
@@ -301,6 +302,7 @@ public partial class MainWindow : Window
                         SetExtensionInstallState(context.ProfileId, stage, busy: true);
                     reportedServerStatus |= ApplyExtensionServerStatusLine(context.ProfileId, line);
                     ApplyCodexAccountAccessLine(context.ProfileId, line);
+                    ApplyCodexHomeStatusLine(context.ProfileId, line);
                 });
             var output = string.Join(Environment.NewLine,
                 new[] { result.StandardOutput, result.StandardError }
@@ -363,7 +365,8 @@ public partial class MainWindow : Window
         return new ExtensionServerStatus(parts[1], parts[2]);
     }
 
-    private static string FormatExtensionServerStatus(ExtensionServerStatus status, CodexAccountAccess? accountAccess)
+    private static string FormatExtensionServerStatus(
+        ExtensionServerStatus status, CodexAccountAccess? accountAccess, string? homeStatus)
     {
         var installation = status.Installation switch
         {
@@ -373,6 +376,8 @@ public partial class MainWindow : Window
         };
         if (status.Installation == "not-installed")
             return installation;
+        if (status.Installation == "installed" && homeStatus is "missing" or "unavailable")
+            return $"{installation} · {GetCodexHomeLabel(homeStatus)}";
         if (accountAccess?.Status == "unreachable")
             return $"{installation} · 无法访问";
         if (status.Installation == "unknown" && status.SignIn == "unknown")
@@ -422,6 +427,23 @@ public partial class MainWindow : Window
             DisplayExtensionInstallState();
     }
 
+    private static Match? GetCodexHomeMatch(string output) => Regex.Matches(output,
+        @"(?m)^CODEX_HOME_STATUS:(ready|created|missing|unavailable|unknown):(default|custom|unknown)\r?$")
+        .LastOrDefault();
+
+    private static string GetCodexHomeLabel(string status) =>
+        status == "missing" ? "运行目录缺失" : "运行目录不可用";
+
+    private void ApplyCodexHomeStatusLine(Guid profileId, string line)
+    {
+        if (GetCodexHomeMatch(line) is not { } match)
+            return;
+
+        _codexHomeStatuses[profileId] = match.Groups[1].Value;
+        if (_selectedProfile?.Profile.Id == profileId)
+            DisplayExtensionInstallState();
+    }
+
     private void SetExtensionInstallState(Guid profileId, string text, bool busy = false)
     {
         _extensionInstallDisplays[profileId] = new ExtensionInstallDisplay(text, busy);
@@ -467,7 +489,8 @@ public partial class MainWindow : Window
             { IsLegacy: false, Profile.Status: not ProfileStatus.Ready } => "完成 SSH 初始化后检测",
             { ConfigPath: null } => UnknownExtensionServerStatus,
             _ when serverStatus is not null => FormatExtensionServerStatus(
-                serverStatus, _codexAccountAccess.GetValueOrDefault(item.Profile.Id)),
+                serverStatus, _codexAccountAccess.GetValueOrDefault(item.Profile.Id),
+                _codexHomeStatuses.GetValueOrDefault(item.Profile.Id)),
             _ => "安装和登录状态待检测"
         };
         ExtensionInstallControls.Visibility = serverStatus?.Installation == "installed"
@@ -1133,6 +1156,7 @@ public partial class MainWindow : Window
         if (checkingExtension)
         {
             _codexAccountAccess.Remove(operationContext.ProfileId);
+            _codexHomeStatuses.Remove(operationContext.ProfileId);
             DisplayExtensionInstallState();
         }
 
@@ -1143,6 +1167,7 @@ public partial class MainWindow : Window
             {
                 reportedExtensionStatus |= ApplyExtensionServerStatusLine(operationContext.ProfileId, line);
                 ApplyCodexAccountAccessLine(operationContext.ProfileId, line);
+                ApplyCodexHomeStatusLine(operationContext.ProfileId, line);
                 ApplyTunnelStateLine(operationContext.ProfileId, line);
             });
 
@@ -1442,6 +1467,18 @@ public partial class MainWindow : Window
                 "下一步：确认服务器在线，核对 SSH 地址、端口和认证配置后刷新状态。");
         }
 
+        if (GetBlockingCodexHome(command, output) is { } home)
+        {
+            var action = home.Groups[1].Value == "missing" && home.Groups[2].Value == "default"
+                ? "下一步：点击「刷新状态」，让应用准备默认的 ~/.codex 目录。"
+                : "下一步：在服务器上核对 CODEX_HOME 指向的目录及其权限，再刷新状态。";
+            return Describe($"诊断结论：远程 Codex {GetCodexHomeLabel(home.Groups[1].Value)}，后端无法启动。\n" + action);
+        }
+
+        if (DidPrepareCodexHome(command, output))
+            return Describe("已准备远程 Codex 运行目录。\n" +
+                "下一步：在当前 VS Code 窗口中重新启动扩展宿主，再刷新状态。");
+
         if (IsTunnelDisabled(output) && !applicationNetworkDirect)
             return Describe("代理隧道已关闭，刷新状态会保留此设置。\n下一步：如需使用 Windows 代理，点击隧道按钮启用。");
 
@@ -1590,6 +1627,18 @@ public partial class MainWindow : Window
 
     private static bool HasInstalledExtension(string output) =>
         Regex.IsMatch(output, @"(?m)^CODEX_EXTENSION_STATUS:installed:(?:signed-in|sign-in-required|unknown)\r?$");
+
+    private static Match? GetBlockingCodexHome(string command, string output)
+    {
+        var home = GetCodexHomeMatch(output);
+        return (HasInstalledExtension(output) || command is "start" or "start-tunnel")
+               && home?.Groups[1].Value is "missing" or "unavailable" ? home : null;
+    }
+
+    private static bool DidPrepareCodexHome(string command, string output) =>
+        command is "refresh" or "start" && GetCodexHomeMatch(output)?.Groups[1].Value == "created"
+        && HasInstalledExtension(output)
+        && GetAccountAccessMatch(output).Groups[4].Value != "process";
 
     private static bool DirectProbeSucceeded(string output) =>
         Regex.IsMatch(output, @"(?m)^CODEX_DIRECT_OK:401:attempt-[12]\r?$");
@@ -1899,6 +1948,14 @@ public partial class MainWindow : Window
         else if (sshNotReady)
         {
             SetState("SSH 连接不可用", StateKind.Error);
+        }
+        else if (GetBlockingCodexHome(command, output) is { } home)
+        {
+            SetState($"Codex {GetCodexHomeLabel(home.Groups[1].Value)}", StateKind.Error);
+        }
+        else if (DidPrepareCodexHome(command, output))
+        {
+            SetState("Codex 运行目录已准备", StateKind.Warning);
         }
         else if (IsTunnelDisabled(output) && !applicationNetworkDirect)
         {

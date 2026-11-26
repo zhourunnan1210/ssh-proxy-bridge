@@ -9,6 +9,7 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile([IO.Path]::GetFullPath($ScriptPath), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw $errors[0].Message }
 foreach ($functionName in @('Get-RemoteCodexAuthenticationScript', 'Get-RemoteCodexExtensionProbeScript',
+    'Get-RemoteCodexHomeScript', 'Write-RemoteCodexHomeStatus',
     'Write-RemoteCodexExtensionStatus', 'Test-RemoteCodexAuthentication')) {
     $definition = $ast.Find({
         param($node)
@@ -30,7 +31,7 @@ function Invoke-Ssh($Configuration, [string]$Command, [switch]$UseAlias) {
 fixture_home=$1
 if [ -x /usr/bin/cygpath ]; then fixture_home=$(/usr/bin/cygpath -u "$fixture_home"); fi
 export HOME="$fixture_home"
-unset CODEX_HOME VSCODE_AGENT_FOLDER VSCODE_EXTENSIONS
+unset SHELL CODEX_HOME VSCODE_AGENT_FOLDER VSCODE_EXTENSIONS
 case "$2" in
     custom) export VSCODE_EXTENSIONS="$HOME/custom extensions" ;;
 esac

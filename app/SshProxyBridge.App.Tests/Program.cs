@@ -384,6 +384,31 @@ internal static class Program
                 throw new InvalidOperationException("A failed stop was reported as fully closed.");
             Console.WriteLine("PASS  Refresh prefers the final account check and respects a disabled tunnel.");
 
+            const string missingCodexHome = "Application network: proxy\n" +
+                "CODEX_EXTENSION_STATUS:installed:sign-in-required\nCODEX_HOME_STATUS:missing:default\n" +
+                "CODEX_ACCOUNT_ACCESS:reachable:proxy:401:shell\nCodex authentication: sign-in required";
+            updateState.Invoke(window, ["status", 0, missingCodexHome]);
+            var missingHomeSummary = (string?)buildUserFacingLog.Invoke(null, ["status", missingCodexHome]);
+            if (statusText.Text != "Codex 运行目录缺失"
+                || missingHomeSummary is null || !missingHomeSummary.Contains("刷新状态", StringComparison.Ordinal))
+                throw new InvalidOperationException("A missing Codex home was mistaken for a network or sign-in failure.");
+            var unavailableHome = missingCodexHome.Replace("missing:default", "unavailable:custom", StringComparison.Ordinal);
+            updateState.Invoke(window, ["status", 0, unavailableHome]);
+            var unavailableHomeSummary = (string?)buildUserFacingLog.Invoke(null, ["status", unavailableHome]);
+            if (statusText.Text != "Codex 运行目录不可用" || unavailableHomeSummary is null
+                || !unavailableHomeSummary.Contains("核对 CODEX_HOME", StringComparison.Ordinal)
+                || unavailableHomeSummary.Contains("准备默认的", StringComparison.Ordinal))
+                throw new InvalidOperationException("An unavailable custom directory offered the default directory repair.");
+            var preparedHome = "REFRESH_FINAL_STATUS\n" +
+                missingCodexHome.Replace("missing:default", "created:default", StringComparison.Ordinal) +
+                "\nRefresh result: repaired";
+            updateState.Invoke(window, ["refresh", 0, preparedHome]);
+            var preparedHomeSummary = (string?)buildUserFacingLog.Invoke(null, ["refresh", preparedHome]);
+            if (statusText.Text != "Codex 运行目录已准备" || preparedHomeSummary is null
+                || !preparedHomeSummary.Contains("重新启动扩展宿主", StringComparison.Ordinal))
+                throw new InvalidOperationException("Refresh did not explain recovery for the already running VS Code window.");
+            Console.WriteLine("PASS  Codex home failure and recovery take priority over a shell-only account probe.");
+
             const string layeredSshFailureOutput =
                 "Proxy: running\n" +
                 "Tunnel: running (PID 123)\n" +
@@ -592,6 +617,9 @@ internal static class Program
             var applyAccountAccess = typeof(MainWindow).GetMethod(
                 "ApplyCodexAccountAccessLine", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("Account access state is not available.");
+            var applyCodexHome = typeof(MainWindow).GetMethod(
+                "ApplyCodexHomeStatusLine", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Codex home state is not available.");
             var applyTunnelState = typeof(MainWindow).GetMethod(
                 "ApplyTunnelStateLine", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("Tunnel state is not available.");
@@ -614,6 +642,11 @@ internal static class Program
             applyAccountAccess.Invoke(window, [activeFixture.Id, "CODEX_ACCOUNT_ACCESS:reachable:proxy:401:shell"]);
             if (extensionServerStatus.Text != "服务器已安装 · 扩展访问待确认")
                 throw new InvalidOperationException("A shell-only probe was treated as the active extension's network state.");
+            applyCodexHome.Invoke(window, [activeFixture.Id, "CODEX_HOME_STATUS:missing:default"]);
+            applyCodexHome.Invoke(window, [Guid.NewGuid(), "CODEX_HOME_STATUS:ready:default"]);
+            if (extensionServerStatus.Text != "服务器已安装 · 运行目录缺失")
+                throw new InvalidOperationException("The Codex card did not keep the selected server's missing-home result.");
+            applyCodexHome.Invoke(window, [activeFixture.Id, "CODEX_HOME_STATUS:ready:default"]);
             applyAccountAccess.Invoke(window, [activeFixture.Id, "CODEX_ACCOUNT_ACCESS:reachable:proxy:401:process"]);
             if (extensionServerStatus.Text != "服务器已安装 · 未登录")
                 throw new InvalidOperationException("A reachable account service did not expose the sign-in result.");

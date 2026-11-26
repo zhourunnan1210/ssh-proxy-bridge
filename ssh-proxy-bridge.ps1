@@ -1769,11 +1769,140 @@ printf 'VSCODE_SERVER_RESTARTED:%s\n' "$(printf '%s' "$pids" | xargs)"
     Write-Pass "Remote VS Code Server processes were stopped safely ($($marker.Trim()))."
 }
 
+function Get-RemoteCodexHomeScript {
+    return @'
+valid_codex_home_path() {
+    [[ "$1" == /* && "$1" != *$'\n'* && "$1" != *$'\r'* ]]
+}
+
+find_running_codex_home() {
+    local proc executable arg setting process_home process_codex_home found=''
+    local deadline=$((SECONDS + 2))
+    for proc in /proc/[0-9]*; do
+        [ "$SECONDS" -lt "$deadline" ] || return 2
+        [ -O "$proc" ] && [ -r "$proc/cmdline" ] || continue
+        {
+            IFS= read -r -d '' executable || continue
+            case "$executable" in */openai.chatgpt-*/*/codex) ;; *) continue ;; esac
+            arg=''
+            while IFS= read -r -d '' arg && [ "$arg" != app-server ]; do :; done
+            [ "$arg" = app-server ] || continue
+        } 2>/dev/null <"$proc/cmdline"
+        [ -r "$proc/environ" ] || return 2
+        process_home=''; process_codex_home=''
+        while IFS= read -r -d '' setting; do
+            case "$setting" in
+                HOME=*) process_home=${setting#*=} ;;
+                CODEX_HOME=*) process_codex_home=${setting#*=} ;;
+            esac
+        done 2>/dev/null <"$proc/environ" || return 2
+        if [ -z "$process_codex_home" ]; then
+            [ -n "$process_home" ] || return 2
+            process_codex_home="${process_home%/}/.codex"
+        fi
+        valid_codex_home_path "$process_codex_home" || return 2
+        [ -z "$found" ] || [ "$found" = "$process_codex_home" ] || return 2
+        found=$process_codex_home
+    done
+    [ -n "$found" ] || return 1
+    printf '%s\n' "$found"
+}
+
+resolve_codex_home() {
+    local default_home=$1 login_shell=${SHELL:-} output line path=''
+    if path=$(find_running_codex_home); then
+        printf '%s\n' "$path"
+        return
+    elif [ "$?" -ne 1 ]; then
+        return 1
+    fi
+    if [ -n "${CODEX_HOME:-}" ]; then
+        valid_codex_home_path "$CODEX_HOME" || return 1
+        printf '%s\n' "$CODEX_HOME"
+        return
+    fi
+    # The remote extension asks an interactive login shell for CODEX_HOME.
+    case "${login_shell##*/}" in
+        ''|csh|tcsh|fish|nu|xonsh|pwsh|powershell|cmd|cmd.exe)
+            printf '%s\n' "$default_home"
+            return ;;
+    esac
+    [ -x "$login_shell" ] && command -v timeout >/dev/null 2>&1 || return 1
+    output=$(timeout -k 1s 3s "$login_shell" -l -i -c '
+        codex_home=${CODEX_HOME:-$HOME/.codex}
+        newline=$(printf "\n."); newline=${newline%.}
+        case "$codex_home" in *"$newline"*|*"$(printf "\r")"*) exit 2 ;; esac
+        printf "\n__SSH_PROXY_BRIDGE_CODEX_HOME__:%s\n" "$codex_home"
+    ' </dev/null 2>/dev/null) || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            __SSH_PROXY_BRIDGE_CODEX_HOME__:*) path=${line#*:} ;;
+        esac
+    done <<<"$output"
+    valid_codex_home_path "$path" || return 1
+    printf '%s\n' "$path"
+}
+
+probe_codex_home() {
+    local mode=$1 home=${HOME:-} default_home parent
+    codex_effective_home=''
+    codex_home_state=unknown
+    codex_home_origin=unknown
+    if [ "$home" != / ] && valid_codex_home_path "$home"; then
+        default_home="${home%/}/.codex"
+        if codex_effective_home=$(resolve_codex_home "$default_home"); then
+            codex_home_origin=custom
+            [ "$codex_effective_home" != "$default_home" ] || codex_home_origin=default
+            parent=${codex_effective_home%/*}
+            if [ -d "$codex_effective_home" ]; then
+                codex_home_state=unavailable
+                if [ -r "$codex_effective_home" ] && [ -w "$codex_effective_home" ] && [ -x "$codex_effective_home" ]; then
+                    codex_home_state=ready
+                fi
+            elif [ -e "$codex_effective_home" ] || [ -L "$codex_effective_home" ] ||
+                { [ -d "${parent:-/}" ] && [ ! -x "${parent:-/}" ]; }; then
+                codex_home_state=unavailable
+            else
+                codex_home_state=missing
+                if [ "$mode" = prepare ] && [ "$codex_home_origin" = default ]; then
+                    if mkdir -m 700 -- "$default_home" 2>/dev/null; then
+                        codex_home_state=created
+                    elif [ -d "$default_home" ] && [ -r "$default_home" ] && [ -w "$default_home" ] && [ -x "$default_home" ]; then
+                        codex_home_state=ready
+                    else
+                        codex_home_state=unavailable
+                    fi
+                fi
+            fi
+        fi
+    fi
+    printf 'CODEX_HOME_STATUS:%s:%s\n' "$codex_home_state" "$codex_home_origin"
+}
+
+probe_codex_auth_for_home() {
+    case "$codex_home_state" in
+        ready|created) probe_codex_auth ;;
+        *) printf 'CODEX_AUTH_UNKNOWN\n' ;;
+    esac
+}
+'@
+}
+
+function Write-RemoteCodexHomeStatus($Output, [switch]$PreserveCreated) {
+    $line = $Output | Where-Object {
+        $_ -cmatch '^CODEX_HOME_STATUS:(ready|created|missing|unavailable|unknown):(default|custom|unknown)$'
+    } | Select-Object -First 1
+    if ($PreserveCreated -and $script:LastCodexHomeCreated -and $line -ceq 'CODEX_HOME_STATUS:ready:default') { return }
+    $script:LastCodexHomeCreated = $line -ceq 'CODEX_HOME_STATUS:created:default'
+    if ($line) { Write-Host $line }
+    else { Write-Host 'CODEX_HOME_STATUS:unknown:unknown' }
+}
+
 function Get-RemoteCodexAuthenticationScript {
     return @'
 set +x
 probe_codex_auth() {
-    local auth_root=${CODEX_HOME:-$HOME/.codex} auth_file mode proc command_line
+    local auth_root=${codex_effective_home:-${CODEX_HOME:-$HOME/.codex}} auth_file mode proc command_line
     local deadline=$((SECONDS + 5))
     auth_file="$auth_root/auth.json"
     if [ -f "$auth_file" ] && [ -r "$auth_file" ] &&
@@ -1943,22 +2072,37 @@ function Write-RemoteCodexExtensionStatus($Output, [string]$Fallback = 'unknown:
     else { Write-Host "CODEX_EXTENSION_STATUS:$Fallback" }
 }
 
-function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet, [switch]$IncludeExtensionStatus) {
+function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet, [switch]$IncludeExtensionStatus,
+    [switch]$PrepareCodexHome, [switch]$HomePreparationOnly, [switch]$PreserveCreatedCodexHome) {
     $script = "set -u`n" + (Get-RemoteCodexAuthenticationScript) + "`n"
+    $reportCodexHome = $IncludeExtensionStatus -or $PrepareCodexHome
     if ($IncludeExtensionStatus) {
         $script:LastRemoteCodexAuthenticationState = 'unknown'
         $script += (Get-RemoteCodexExtensionProbeScript) + "`n"
+        $script += 'extension_status=$(probe_codex_extension || true)' + "`n"
+        $script += 'case "$extension_status" in installed|not-installed) ;; *) extension_status=unknown ;; esac' + "`n"
     }
-    $script += 'auth_marker=$(probe_codex_auth); printf "%s\n" "$auth_marker"' + "`n"
-    if ($IncludeExtensionStatus) {
-        $script += @'
-extension_status=$(probe_codex_extension || true)
-case "$extension_status" in installed|not-installed) ;; *) extension_status=unknown ;; esac
+    if ($reportCodexHome) {
+        $script += (Get-RemoteCodexHomeScript) + "`nhome_mode=inspect`n"
+        if ($PrepareCodexHome) {
+            $script += 'if [ "${extension_status:-installed}" = installed ]; then home_mode=prepare; fi' + "`n"
+        }
+        $script += 'probe_codex_home "$home_mode"' + "`n"
+        if (-not $HomePreparationOnly) { $script += 'auth_marker=$(probe_codex_auth_for_home)' + "`n" }
+    }
+    else {
+        $script += 'auth_marker=$(probe_codex_auth)' + "`n"
+    }
+    if (-not $HomePreparationOnly) {
+        $script += 'printf "%s\n" "$auth_marker"' + "`n"
+        if ($IncludeExtensionStatus) {
+            $script += @'
 sign_in=$(codex_sign_in_state "$auth_marker")
 printf 'CODEX_EXTENSION_STATUS:%s:%s\n' "$extension_status" "$sign_in"
 '@ + "`n"
+        }
+        $script += 'case "$auth_marker" in CODEX_AUTH_READY:*) exit 0 ;; *) exit 1 ;; esac'
     }
-    $script += 'case "$auth_marker" in CODEX_AUTH_READY:*) exit 0 ;; *) exit 1 ;; esac'
     $scriptBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
     $command = "printf %s $scriptBase64 | base64 -d | bash"
@@ -1966,12 +2110,15 @@ printf 'CODEX_EXTENSION_STATUS:%s:%s\n' "$extension_status" "$sign_in"
         $result = Invoke-Ssh $Configuration $command -UseAlias
     }
     catch {
-        if (-not $IncludeExtensionStatus) { throw }
-        Write-RemoteCodexExtensionStatus $null
+        if (-not $reportCodexHome) { throw }
+        Write-RemoteCodexHomeStatus $null
+        if ($IncludeExtensionStatus -and -not $HomePreparationOnly) { Write-RemoteCodexExtensionStatus $null }
         return $false
     }
+    $statusOutput = if ($result.ExitCode -in @(0, 1)) { $result.Output } else { @() }
+    if ($reportCodexHome) { Write-RemoteCodexHomeStatus $statusOutput -PreserveCreated:$PreserveCreatedCodexHome }
+    if ($HomePreparationOnly) { return $result.ExitCode -eq 0 }
     if ($IncludeExtensionStatus) {
-        $statusOutput = if ($result.ExitCode -in @(0, 1)) { $result.Output } else { @() }
         Write-RemoteCodexExtensionStatus $statusOutput
     }
     $marker = (($result.Output | Where-Object {
@@ -2281,8 +2428,9 @@ function Save-CodexExtensionVsix($Configuration, [string]$Target, [string]$Path)
 function Install-CodexExtension($Configuration, [string]$Route) {
     Write-Host 'CODEX_EXTENSION_PROGRESS:checking'
     $serverScript = (Get-CodexExtensionServerScript) + "`n"
+    $homePreparationScript = "`n" + (Get-RemoteCodexHomeScript) + "`nprobe_codex_home prepare`n"
     $completionScript = "`n" + (Get-RemoteCodexAuthenticationScript) + "`n" + @'
-auth_marker=$(probe_codex_auth || true)
+auth_marker=$(probe_codex_auth_for_home || true)
 sign_in=$(codex_sign_in_state "$auth_marker")
 printf 'CODEX_EXTENSION_STATUS:installed:%s\n' "$sign_in"
 '@
@@ -2308,11 +2456,11 @@ trap 'exit 130' HUP INT TERM
 cat >"$archive" || fail archive-integrity
 digest=$(sha256sum -- "$archive") || fail archive-integrity
 [ "${digest%% *}" = '__HASH__' ] || fail archive-integrity
-install_codex "$archive" --do-not-include-pack-dependencies
 '@
             $upload = $upload.Replace('__TARGET__', $target).Replace('__HASH__', $hash)
             Write-Host 'CODEX_EXTENSION_PROGRESS:ssh-upload'
-            $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + $upload + $completionScript) 1880 $path
+            $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + $upload + $homePreparationScript +
+                'install_codex "$archive" --do-not-include-pack-dependencies' + $completionScript) 1880 $path
             Assert-CodexExtensionSshResult $result
         }
         finally { [IO.File]::Delete($path) }
@@ -2330,9 +2478,11 @@ export HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy" http_proxy="$proxy" https_proxy=
             $serverScript += $proxySetup.Replace('__PROXY_BASE64__', $proxyBase64) + "`n"
         }
         Write-Host 'CODEX_EXTENSION_PROGRESS:remote-download-install'
-        $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + 'install_codex openai.chatgpt' + $completionScript) 2400
+        $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + $homePreparationScript +
+            'install_codex openai.chatgpt' + $completionScript) 2400
         Assert-CodexExtensionSshResult $result
     }
+    Write-RemoteCodexHomeStatus $result.Output
     Write-RemoteCodexExtensionStatus $result.Output 'installed:unknown'
     Write-Host 'CODEX_EXTENSION_PROGRESS:complete'
 }
@@ -2600,6 +2750,7 @@ function Invoke-ConnectionStatus($Configuration, [switch]$RepairWhenReady) {
         Write-Host 'Application network: unknown'
         Write-Host 'Codex authentication: unknown'
         Write-Host 'CODEX_ACCOUNT_ACCESS:unknown:unknown:none:unknown'
+        Write-RemoteCodexHomeStatus $null
         Write-RemoteCodexExtensionStatus $null
         if ($sshLoginError) {
             Write-Fail "SSH login check failed: $sshLoginError"
@@ -2612,12 +2763,13 @@ function Invoke-ConnectionStatus($Configuration, [switch]$RepairWhenReady) {
     }
 
     Write-ApplicationNetworkStatus $applicationNetworkOk
-    $null = Test-RemoteCodexAuthentication $Configuration -Quiet -IncludeExtensionStatus
+    $script:LastCodexHomeCreated = $false
+    $null = Test-RemoteCodexAuthentication $Configuration -Quiet -IncludeExtensionStatus -PrepareCodexHome:$RepairWhenReady
     Write-Host "Codex authentication: $script:LastRemoteCodexAuthenticationState"
     if ($RepairWhenReady) {
         $result = if ($repairFailed -or $finalSnapshot.State -eq 'interrupted' -or
             (-not $applicationNetworkOk -and $finalSnapshot.Intent -ne 'disabled')) { 'attention' }
-        elseif ($changed) { 'repaired' }
+        elseif ($changed -or $script:LastCodexHomeCreated) { 'repaired' }
         else { 'checked' }
         Write-Host "Refresh result: $result"
     }
@@ -2706,11 +2858,12 @@ try {
                 Write-Pass 'Windows proxy tunnel fallback selected.'
             }
             Write-ManagedTunnelStatus (Get-ManagedTunnelSnapshot $configuration)
+            $null = Test-RemoteCodexAuthentication $configuration -Quiet -IncludeExtensionStatus -PrepareCodexHome -HomePreparationOnly
             Start-VsCode $configuration
             $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
             Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
-            $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
-            Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
+            $null = Test-RemoteCodexAuthentication $configuration -Quiet -IncludeExtensionStatus -PreserveCreatedCodexHome
+            Write-Host "Codex authentication: $script:LastRemoteCodexAuthenticationState"
             if (-not $applicationNetworkOk) {
                 if ($script:LastApplicationNetworkReason -eq 'stale-codex-process') {
                     Write-Host 'Start result: reload-vscode-required'

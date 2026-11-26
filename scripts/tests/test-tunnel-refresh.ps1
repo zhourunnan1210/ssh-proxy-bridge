@@ -78,7 +78,8 @@ function Write-MonitorEvent([string]$Message, [string]$Level) { }
 function Write-Warn([string]$Message) { }
 function Write-Pass([string]$Message) { }
 function Write-SshLoginMarkers { }
-function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet, [switch]$IncludeExtensionStatus) {
+function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet, [switch]$IncludeExtensionStatus, [switch]$PrepareCodexHome) {
+    Write-Host "fixture-codex-home:$(if ($PrepareCodexHome) { 'prepare' } else { 'inspect' })"
     $script:LastRemoteCodexAuthenticationState = 'ready'
     return $true
 }
@@ -137,6 +138,9 @@ function Assert-Refresh([string]$TunnelState, [string]$Result, [string[]]$Action
     if (@($output | Where-Object { "$_" -match '^Application network marker:' }).Count -ne 1) {
         throw 'Refresh must report one final application network marker.'
     }
+    if (($output -join "`n") -cnotmatch '(?ms)^REFRESH_FINAL_STATUS$.*^fixture-codex-home:prepare$') {
+        throw 'Explicit refresh must prepare the Codex home in its final status block.'
+    }
     if ($output[-1] -ne 0 -or $script:networkChecks.Count -ne 0 -or
             ($script:actions -join ',') -ne ($Actions -join ',')) {
         throw "Unexpected actions. Expected [$($Actions -join ',')]; ran [$($script:actions -join ',')]."
@@ -145,6 +149,12 @@ function Assert-Refresh([string]$TunnelState, [string]$Result, [string[]]$Action
 
 try {
     [IO.File]::WriteAllText($routeIntentPath, 'proxy')
+    Initialize-Scenario 'disabled' $false $false @('APPLICATION_NETWORK_READY:direct:1/1')
+    $status = @(Invoke-ConnectionStatus $configuration 6>&1)
+    if ($status[-1] -ne 0 -or ($status -join "`n") -cnotmatch '(?m)^fixture-codex-home:inspect$' -or $script:actions.Count) {
+        throw 'Read-only status must inspect the Codex home without preparing it.'
+    }
+
     Initialize-Scenario 'disabled' $false $false @('APPLICATION_NETWORK_ROUTE_MISSING')
     Assert-Refresh 'stopped' 'checked' @()
 
@@ -188,6 +198,7 @@ finally {
 
 Write-Host 'PASS  Refresh preserves a stopped tunnel and a healthy direct route, and restores a lost enabled tunnel.'
 Write-Host 'PASS  Refresh reports one final status and restores only the known application route.'
+Write-Host 'PASS  Explicit refresh prepares the Codex home and automated status only inspects it.'
 Write-Host 'PASS  Old proxy guard is migrated once and current healthy routing is preserved.'
 Write-Host 'PASS  Explicit stop records disabled intent and stops the managed monitor and tunnel.'
 Write-Host 'PASS  Repair keeps live forwarding processes when only upstream validation fails.'
