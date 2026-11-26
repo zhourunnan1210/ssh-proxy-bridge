@@ -1497,49 +1497,222 @@ printf 'VSCODE_SERVER_RESTARTED:%s\n' "$(printf '%s' "$pids" | xargs)"
     Write-Pass "Remote VS Code Server processes were stopped safely ($($marker.Trim()))."
 }
 
-function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet) {
-    $script = @'
-set -u
-auth_file="$HOME/.codex/auth.json"
-if [ -s "$auth_file" ]; then
-    mode=$(sed -n 's/.*"auth_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$auth_file" | head -n 1)
-    case "$mode" in
-        chatgpt|apikey)
-            printf 'CODEX_AUTH_READY:%s\n' "$mode"
-            exit 0
-            ;;
-    esac
-    if grep -Eq '"(access_token|id_token|OPENAI_API_KEY)"[[:space:]]*:' "$auth_file"; then
-        printf 'CODEX_AUTH_READY:file\n'
-        exit 0
+function Get-RemoteCodexAuthenticationScript {
+    return @'
+set +x
+probe_codex_auth() {
+    local auth_root=${CODEX_HOME:-$HOME/.codex} auth_file mode proc command_line
+    local deadline=$((SECONDS + 5))
+    auth_file="$auth_root/auth.json"
+    if [ -f "$auth_file" ] && [ -r "$auth_file" ] &&
+        grep -Eq '"(access_token|id_token|OPENAI_API_KEY)"[[:space:]]*:[[:space:]]*"[^"[:space:]]' "$auth_file" 2>/dev/null; then
+        mode=$(sed -n 's/.*"auth_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$auth_file" 2>/dev/null | head -n 1)
+        case "$mode" in
+            chatgpt|apikey) printf 'CODEX_AUTH_READY:%s\n' "$mode" ;;
+            *) printf 'CODEX_AUTH_READY:file\n' ;;
+        esac
+        return
     fi
-fi
-for proc in /proc/[0-9]*; do
-    [ -r "$proc/cmdline" ] && [ -r "$proc/environ" ] || continue
-    command_line=$(tr '\0' ' ' <"$proc/cmdline" 2>/dev/null || true)
-    case "$command_line" in
-        *"$HOME/.vscode-server/extensions/openai.chatgpt-"*) ;;
-        *) continue ;;
-    esac
-    if tr '\0' '\n' <"$proc/environ" |
-        grep -Eq '^(OPENAI_API_KEY|CODEX_API_KEY)=.+'; then
-        printf 'CODEX_AUTH_READY:process-env\n'
-        exit 0
+    for proc in /proc/[0-9]*; do
+        if [ "$SECONDS" -ge "$deadline" ]; then printf 'CODEX_AUTH_UNKNOWN\n'; return; fi
+        [ -O "$proc" ] && [ -r "$proc/cmdline" ] && [ -r "$proc/environ" ] || continue
+        command_line=$(tr '\0' ' ' 2>/dev/null <"$proc/cmdline" || true)
+        case "$command_line" in
+            */openai.chatgpt-*) ;;
+            *) continue ;;
+        esac
+        if tr '\0' '\n' 2>/dev/null <"$proc/environ" |
+            grep -Eq '^(OPENAI_API_KEY|CODEX_API_KEY)=.+'; then
+            printf 'CODEX_AUTH_READY:process-env\n'
+            return
+        fi
+    done
+    if { { [ -e "$auth_file" ] || [ -L "$auth_file" ]; } && { [ ! -f "$auth_file" ] || [ ! -r "$auth_file" ]; }; } ||
+        { [ -d "$auth_root" ] && [ ! -x "$auth_root" ]; }; then
+        printf 'CODEX_AUTH_UNKNOWN\n'
+    else
+        printf 'CODEX_AUTH_SIGN_IN_REQUIRED\n'
     fi
-done
-printf 'CODEX_AUTH_SIGN_IN_REQUIRED\n'
-exit 1
+}
+codex_sign_in_state() {
+    case "$1" in
+        CODEX_AUTH_READY:*) printf 'signed-in' ;;
+        CODEX_AUTH_SIGN_IN_REQUIRED) printf 'sign-in-required' ;;
+        *) printf 'unknown' ;;
+    esac
+}
 '@
+}
+
+function Get-RemoteCodexExtensionProbeScript {
+    return @'
+probe_codex_extension() {
+    local proc arg settings data_dir extensions_dir server_script path parent node_exe
+    local i unreadable=0
+    local -a directories=() args=()
+    for proc in /proc/[0-9]*; do
+        [ -O "$proc" ] && [ -r "$proc/cmdline" ] || continue
+        args=()
+        mapfile -d '' -t args 2>/dev/null <"$proc/cmdline" || continue
+        data_dir=''; extensions_dir=''; server_script=''
+        for ((i=0; i<${#args[@]}; i++)); do
+            arg=${args[i]}
+            case "$arg" in
+                */out/server-main.js) server_script=$arg ;;
+                --extensions-dir=*) extensions_dir=${arg#*=} ;;
+                --extensions-dir) extensions_dir=${args[i+1]:-} ;;
+                --server-data-dir=*) data_dir=${arg#*=} ;;
+                --server-data-dir) data_dir=${args[i+1]:-} ;;
+            esac
+        done
+        [ -n "$server_script" ] || continue
+        if [ -z "$extensions_dir" ] && [ -r "$proc/environ" ]; then
+            while IFS= read -r -d '' settings; do
+                case "$settings" in
+                    VSCODE_EXTENSIONS=*) extensions_dir=${settings#*=} ;;
+                    VSCODE_AGENT_FOLDER=*) [ -n "$data_dir" ] || data_dir=${settings#*=} ;;
+                esac
+            done 2>/dev/null <"$proc/environ"
+        fi
+        if [ -z "$data_dir" ]; then
+            case "$server_script" in
+                */cli/servers/*/server/out/server-main.js) data_dir=${server_script%%/cli/servers/*} ;;
+                */bin/*/out/server-main.js) data_dir=${server_script%%/bin/*} ;;
+            esac
+        fi
+        if [ -n "$extensions_dir" ]; then
+            directories+=("$extensions_dir")
+        elif [ -n "$data_dir" ]; then
+            directories+=("$data_dir/extensions")
+        fi
+        path="${server_script%/out/server-main.js}/node"
+        if [ -x "$path" ]; then node_exe=$path; fi
+    done
+    if [ "${#directories[@]}" -eq 0 ]; then
+        if [ -n "${VSCODE_EXTENSIONS:-}" ]; then
+            directories+=("$VSCODE_EXTENSIONS")
+        elif [ -n "${VSCODE_AGENT_FOLDER:-}" ]; then
+            directories+=("$VSCODE_AGENT_FOLDER/extensions")
+        else
+            directories+=("$HOME/.vscode-server/extensions" "$HOME/.vscode-server-insiders/extensions")
+        fi
+    fi
+
+    if [ -z "${node_exe:-}" ]; then
+        for parent in "${VSCODE_AGENT_FOLDER:-$HOME/.vscode-server}" "$HOME/.vscode-server-insiders"; do
+            for path in "$parent"/cli/servers/{Stable,Insiders}-*/server/node "$parent"/bin/*/node; do
+                if [ -x "$path" ]; then node_exe=$path; break 2; fi
+            done
+        done
+    fi
+    if [ -z "${node_exe:-}" ]; then node_exe=$(command -v node || true); fi
+    if [ -n "$node_exe" ]; then
+        env -u NODE_OPTIONS -u NODE_PATH "$node_exe" - "${directories[@]}" 2>/dev/null <<'CODEX_EXTENSION_NODE'
+const fs = require('fs');
+const path = require('path');
+let uncertain = false;
+for (const directory of process.argv.slice(2)) {
+    if (!path.isAbsolute(directory)) { uncertain = true; continue; }
+    let contents;
+    try { contents = fs.readdirSync(directory); } catch (error) {
+        if (error.code !== 'ENOENT') uncertain = true;
+        else {
+            try { if (fs.lstatSync(directory).isSymbolicLink()) uncertain = true; }
+            catch (failure) { if (failure.code !== 'ENOENT') uncertain = true; }
+        }
+        continue;
+    }
+    let registered = null;
+    const locations = new Set(contents.filter(name => /^openai\.chatgpt-[0-9]/i.test(name)));
+    try {
+        if (contents.includes('extensions.json')) {
+            const registry = JSON.parse(fs.readFileSync(path.join(directory, 'extensions.json'), 'utf8').replace(/^\uFEFF/, ''));
+            if (!Array.isArray(registry)) throw new Error('Invalid registry');
+            registered = registry.filter(entry => entry && entry.identifier && String(entry.identifier.id).toLowerCase() === 'openai.chatgpt');
+            for (const entry of registered) {
+                if (typeof entry.relativeLocation === 'string' && !['.', '..'].includes(entry.relativeLocation) &&
+                    path.basename(entry.relativeLocation) === entry.relativeLocation)
+                    locations.add(entry.relativeLocation);
+            }
+            if (registered.length === 0) continue;
+        }
+    } catch { uncertain = true; }
+    for (const name of locations) {
+        try {
+            const manifest = JSON.parse(fs.readFileSync(path.join(directory, name, 'package.json'), 'utf8').replace(/^\uFEFF/, ''));
+            if (`${manifest.publisher}.${manifest.name}`.toLowerCase() === 'openai.chatgpt') {
+                console.log('installed');
+                process.exit(0);
+            }
+        } catch { uncertain = true; }
+    }
+    if (registered && registered.length) uncertain = true;
+}
+console.log(uncertain ? 'unknown' : 'not-installed');
+CODEX_EXTENSION_NODE
+        return
+    fi
+    for path in "${directories[@]}"; do
+        if [ -d "$path" ] || [ -L "$path" ] || [[ "$path" != /* ]]; then unreadable=1; fi
+        parent=${path%/*}
+        [ -d "$parent" ] && [ ! -x "$parent" ] && unreadable=1
+    done
+    if [ "$unreadable" -eq 0 ]; then printf 'not-installed\n'; else printf 'unknown\n'; fi
+}
+'@
+}
+
+function Write-RemoteCodexExtensionStatus($Output, [string]$Fallback = 'unknown:unknown') {
+    $line = $Output | Where-Object {
+        $_ -cmatch '^CODEX_EXTENSION_STATUS:(installed|not-installed|unknown):(signed-in|sign-in-required|unknown)$'
+    } | Select-Object -First 1
+    if ($line) { Write-Host $line }
+    else { Write-Host "CODEX_EXTENSION_STATUS:$Fallback" }
+}
+
+function Test-RemoteCodexAuthentication($Configuration, [switch]$Quiet, [switch]$IncludeExtensionStatus) {
+    $script = "set -u`n" + (Get-RemoteCodexAuthenticationScript) + "`n"
+    if ($IncludeExtensionStatus) {
+        $script:LastRemoteCodexAuthenticationState = 'unknown'
+        $script += (Get-RemoteCodexExtensionProbeScript) + "`n"
+    }
+    $script += 'auth_marker=$(probe_codex_auth); printf "%s\n" "$auth_marker"' + "`n"
+    if ($IncludeExtensionStatus) {
+        $script += @'
+extension_status=$(probe_codex_extension || true)
+case "$extension_status" in installed|not-installed) ;; *) extension_status=unknown ;; esac
+sign_in=$(codex_sign_in_state "$auth_marker")
+printf 'CODEX_EXTENSION_STATUS:%s:%s\n' "$extension_status" "$sign_in"
+'@ + "`n"
+    }
+    $script += 'case "$auth_marker" in CODEX_AUTH_READY:*) exit 0 ;; *) exit 1 ;; esac'
     $scriptBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes($script.Replace("`r", '')))
     $command = "printf %s $scriptBase64 | base64 -d | bash"
-    $result = Invoke-Ssh $Configuration $command -UseAlias
+    try {
+        $result = Invoke-Ssh $Configuration $command -UseAlias
+    }
+    catch {
+        if (-not $IncludeExtensionStatus) { throw }
+        Write-RemoteCodexExtensionStatus $null
+        return $false
+    }
+    if ($IncludeExtensionStatus) {
+        $statusOutput = if ($result.ExitCode -in @(0, 1)) { $result.Output } else { @() }
+        Write-RemoteCodexExtensionStatus $statusOutput
+    }
     $marker = (($result.Output | Where-Object {
                 $_ -match '^CODEX_AUTH_'
             } | Select-Object -First 1) -as [string])
     $marker = if ($marker) { $marker.Trim() } else { '' }
     $ok = $result.ExitCode -eq 0 -and $marker -match '^CODEX_AUTH_READY:'
+    if ($IncludeExtensionStatus) {
+        if ($ok) { $script:LastRemoteCodexAuthenticationState = 'ready' }
+        elseif ($result.ExitCode -eq 1 -and $marker -ceq 'CODEX_AUTH_SIGN_IN_REQUIRED') {
+            $script:LastRemoteCodexAuthenticationState = 'sign-in required'
+        }
+    }
     if (-not $Quiet) {
         if ($ok) {
             Write-Pass "Remote Codex authentication is configured ($marker)."
@@ -1836,6 +2009,11 @@ function Save-CodexExtensionVsix($Configuration, [string]$Target, [string]$Path)
 function Install-CodexExtension($Configuration, [string]$Route) {
     Write-Host 'CODEX_EXTENSION_PROGRESS:checking'
     $serverScript = (Get-CodexExtensionServerScript) + "`n"
+    $completionScript = "`n" + (Get-RemoteCodexAuthenticationScript) + "`n" + @'
+auth_marker=$(probe_codex_auth || true)
+sign_in=$(codex_sign_in_state "$auth_marker")
+printf 'CODEX_EXTENSION_STATUS:installed:%s\n' "$sign_in"
+'@
     if ($Route -eq 'upload') {
         $check = Invoke-CodexExtensionSsh $Configuration ($serverScript + 'printf "CODEX_EXTENSION_TARGET:%s\n" "$target"') 35
         Assert-CodexExtensionSshResult $check
@@ -1862,7 +2040,7 @@ install_codex "$archive" --do-not-include-pack-dependencies
 '@
             $upload = $upload.Replace('__TARGET__', $target).Replace('__HASH__', $hash)
             Write-Host 'CODEX_EXTENSION_PROGRESS:ssh-upload'
-            $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + $upload) 1880 $path
+            $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + $upload + $completionScript) 1880 $path
             Assert-CodexExtensionSshResult $result
         }
         finally { [IO.File]::Delete($path) }
@@ -1880,9 +2058,10 @@ export HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy" http_proxy="$proxy" https_proxy=
             $serverScript += $proxySetup.Replace('__PROXY_BASE64__', $proxyBase64) + "`n"
         }
         Write-Host 'CODEX_EXTENSION_PROGRESS:remote-download-install'
-        $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + 'install_codex openai.chatgpt') 2400
+        $result = Invoke-CodexExtensionSsh $Configuration ($serverScript + 'install_codex openai.chatgpt' + $completionScript) 2400
         Assert-CodexExtensionSshResult $result
     }
+    Write-RemoteCodexExtensionStatus $result.Output 'installed:unknown'
     Write-Host 'CODEX_EXTENSION_PROGRESS:complete'
 }
 
@@ -2244,6 +2423,7 @@ try {
                 Write-Host 'Application network reason: ssh-not-ready'
                 Write-Host 'Application network: unknown'
                 Write-Host 'Codex authentication: unknown'
+                Write-RemoteCodexExtensionStatus $null
                 if ($sshLoginError) {
                     Write-Fail "SSH login check failed: $sshLoginError"
                 }
@@ -2253,10 +2433,10 @@ try {
                 exit 1
             }
 
+            $null = Test-RemoteCodexAuthentication $configuration -Quiet -IncludeExtensionStatus
             $applicationNetworkOk = Test-RemoteApplicationNetwork $configuration -Quiet
-            $codexAuthenticationOk = Test-RemoteCodexAuthentication $configuration -Quiet
             Write-Host "Application network: $(if ($applicationNetworkOk) { $script:LastApplicationNetworkRoute } else { 'not ready' })"
-            Write-Host "Codex authentication: $(if ($codexAuthenticationOk) { 'ready' } else { 'sign-in required' })"
+            Write-Host "Codex authentication: $script:LastRemoteCodexAuthenticationState"
         }
         'stop' {
             Stop-Monitor

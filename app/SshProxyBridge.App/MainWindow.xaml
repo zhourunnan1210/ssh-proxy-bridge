@@ -176,6 +176,7 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -195,12 +196,16 @@
                                 <Button x:Name="InstallCodexButton" Content="安装扩展"
                                         Style="{StaticResource SecondaryButtonStyle}" Click="InstallCodex_Click" />
                             </StackPanel>
-                            <TextBlock x:Name="ExtensionInstallStatusText" Grid.Row="1" Grid.ColumnSpan="2"
-                                       Text="尚未开始安装" TextWrapping="Wrap" Margin="0,8,0,6"
+                            <TextBlock x:Name="ExtensionServerStatusText" Grid.Row="1" Grid.ColumnSpan="2"
+                                       Text="选择服务器后检测安装和登录状态" TextWrapping="Wrap" Margin="0,8,0,0"
+                                       FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}"
+                                       AutomationProperties.LiveSetting="Polite" />
+                            <TextBlock x:Name="ExtensionInstallStatusText" Grid.Row="2" Grid.ColumnSpan="2"
+                                       Visibility="Collapsed" TextWrapping="Wrap" Margin="0,8,0,6"
                                        Foreground="{StaticResource TextSecondaryBrush}"
                                        AutomationProperties.LiveSetting="Polite" />
-                            <ProgressBar x:Name="ExtensionInstallProgressBar" Grid.Row="2" Grid.ColumnSpan="2"
-                                         Height="6" Minimum="0" Maximum="100" Value="0"
+                            <ProgressBar x:Name="ExtensionInstallProgressBar" Grid.Row="3" Grid.ColumnSpan="2"
+                                         Height="6" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"
                                          Background="#EEF2F7" Foreground="{StaticResource AccentBrush}"
                                          AutomationProperties.Name="Codex 扩展安装进度" />
                         </Grid>

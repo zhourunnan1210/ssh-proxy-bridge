@@ -29,6 +29,8 @@ public partial class MainWindow : Window
     private readonly SshBootstrapService _bootstrapService = new();
     private ProfileListItem? _selectedProfile;
     private readonly Dictionary<Guid, ExtensionInstallDisplay> _extensionInstallDisplays = new();
+    private readonly Dictionary<Guid, string> _extensionServerStatuses = new();
+    private const string UnknownExtensionServerStatus = "无法确认服务器安装和登录状态";
     private bool _operationInProgress;
     private bool _suppressSelectionStatus;
     private int _proxyProbeGeneration;
@@ -296,16 +298,21 @@ public partial class MainWindow : Window
         SetExtensionInstallState(context.ProfileId, "正在检查服务器和 VS Code Server…", busy: true);
         try
         {
+            var reportedServerStatus = false;
             var result = await RunPowerShellWithOptionsAsync(
                 "install-codex", context.ConfigPath, ["-ExtensionInstallRoute", route], line =>
                 {
                     if (GetExtensionInstallStageText(line) is { } stage)
                         SetExtensionInstallState(context.ProfileId, stage, busy: true);
+                    reportedServerStatus |= ApplyExtensionServerStatusLine(context.ProfileId, line);
                 });
             var output = string.Join(Environment.NewLine,
                 new[] { result.StandardOutput, result.StandardError }
                     .Where(value => !string.IsNullOrWhiteSpace(value)));
             var completed = result.ExitCode == 0 && HasExtensionInstallCompletion(result.StandardOutput);
+            if (completed && !reportedServerStatus)
+                SetExtensionServerStatus(context.ProfileId, "服务器已安装 · 登录状态未知");
+
             SetExtensionInstallState(context.ProfileId,
                 completed ? "Codex 扩展安装完成" : "Codex 扩展安装失败，查看技术详情。",
                 completed: completed);
@@ -349,6 +356,50 @@ public partial class MainWindow : Window
     internal static bool HasExtensionInstallCompletion(string output) => output.Split('\n')
         .Any(line => line.Trim() == "CODEX_EXTENSION_PROGRESS:complete");
 
+    internal static string? GetExtensionServerStatusText(string line)
+    {
+        var parts = line.Trim().Split(':');
+        if (parts.Length != 3 || parts[0] != "CODEX_EXTENSION_STATUS")
+            return null;
+
+        var installation = parts[1] switch
+        {
+            "installed" => "服务器已安装",
+            "not-installed" => "服务器未安装",
+            "unknown" => "服务器安装状态未知",
+            _ => null
+        };
+        var signIn = parts[2] switch
+        {
+            "signed-in" => "已登录",
+            "sign-in-required" => "未登录",
+            "unknown" => "登录状态未知",
+            _ => null
+        };
+        if (installation is null || signIn is null)
+            return null;
+
+        return parts[1] == "unknown" && parts[2] == "unknown"
+            ? UnknownExtensionServerStatus
+            : $"{installation} · {signIn}";
+    }
+
+    private bool ApplyExtensionServerStatusLine(Guid profileId, string line)
+    {
+        if (GetExtensionServerStatusText(line) is not { } text)
+            return false;
+
+        SetExtensionServerStatus(profileId, text);
+        return true;
+    }
+
+    private void SetExtensionServerStatus(Guid profileId, string text)
+    {
+        _extensionServerStatuses[profileId] = text;
+        if (_selectedProfile?.Profile.Id == profileId)
+            DisplayExtensionInstallState();
+    }
+
     private void SetExtensionInstallState(Guid profileId, string text, bool busy = false, bool completed = false)
     {
         _extensionInstallDisplays[profileId] = new ExtensionInstallDisplay(text, busy, completed);
@@ -357,13 +408,22 @@ public partial class MainWindow : Window
 
     private void DisplayExtensionInstallState()
     {
-        if (ExtensionInstallStatusText is null || ExtensionInstallProgressBar is null)
+        if (ExtensionServerStatusText is null || ExtensionInstallStatusText is null || ExtensionInstallProgressBar is null)
             return;
 
-        var progress = _selectedProfile is { } item
-            ? _extensionInstallDisplays.GetValueOrDefault(item.Profile.Id)
-            : null;
-        ExtensionInstallStatusText.Text = progress?.Text ?? "选择安装方式后开始安装。";
+        var item = _selectedProfile;
+        ExtensionServerStatusText.Text = item switch
+        {
+            null => "选择服务器后检测安装和登录状态",
+            { IsLegacy: false, Profile.Status: not ProfileStatus.Ready } => "完成 SSH 初始化后检测",
+            { ConfigPath: null } => UnknownExtensionServerStatus,
+            _ => _extensionServerStatuses.GetValueOrDefault(item.Profile.Id, "安装和登录状态待检测")
+        };
+        var progress = item is null ? null : _extensionInstallDisplays.GetValueOrDefault(item.Profile.Id);
+        ExtensionInstallStatusText.Text = progress?.Text ?? string.Empty;
+        ExtensionInstallStatusText.Visibility = progress is null ? Visibility.Collapsed : Visibility.Visible;
+        ExtensionInstallProgressBar.Visibility = progress is { Busy: true } or { Completed: true }
+            ? Visibility.Visible : Visibility.Collapsed;
         ExtensionInstallProgressBar.IsIndeterminate = progress?.Busy == true;
         ExtensionInstallProgressBar.Value = progress?.Completed == true ? ExtensionInstallProgressBar.Maximum : 0;
     }
@@ -1016,13 +1076,21 @@ public partial class MainWindow : Window
         var reloadAfterRepair = false;
         var connectThroughProxy = false;
         var refreshSelectedProfile = false;
+        var checkingExtension = command == "status";
+        var reportedExtensionStatus = false;
+        if (checkingExtension)
+            SetExtensionServerStatus(operationContext.ProfileId, "正在检测服务器安装和登录状态…");
 
         try
         {
-            var result = applicationRoute is null
-                ? await RunPowerShellAsync(command, operationContext.ConfigPath)
-                : await RunPowerShellWithOptionsAsync(
-                    command, operationContext.ConfigPath, arguments: ["-ApplicationRoute", applicationRoute]);
+            var arguments = applicationRoute is null ? null : new[] { "-ApplicationRoute", applicationRoute };
+            Action<string>? processLine = checkingExtension
+                ? line => reportedExtensionStatus |= ApplyExtensionServerStatusLine(operationContext.ProfileId, line)
+                : null;
+            var result = await RunPowerShellWithOptionsAsync(command, operationContext.ConfigPath, arguments, processLine);
+            if (checkingExtension && !reportedExtensionStatus)
+                SetExtensionServerStatus(operationContext.ProfileId, UnknownExtensionServerStatus);
+
             var output = string.Join(Environment.NewLine,
                 new[] { result.StandardOutput, result.StandardError }
                     .Where(value => !string.IsNullOrWhiteSpace(value)));
@@ -1087,6 +1155,9 @@ public partial class MainWindow : Window
         }
         finally
         {
+            if (checkingExtension && !reportedExtensionStatus)
+                SetExtensionServerStatus(operationContext.ProfileId, UnknownExtensionServerStatus);
+
             if ((command is "start" or "start-tunnel" or "repair") && IsWorkflowProfileCurrent(operationContext))
                 await RefreshLocalProxyIndicatorAsync(operationProfile.Profile);
 

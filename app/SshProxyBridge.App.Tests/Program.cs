@@ -62,7 +62,8 @@ internal static class Program
             var profileSelector = Require<ComboBox>(window, "ProfileSelector");
             var installRouteBox = Require<ComboBox>(window, "ExtensionInstallRouteBox");
             _ = Require<Button>(window, "InstallCodexButton");
-            _ = Require<TextBlock>(window, "ExtensionInstallStatusText");
+            var extensionServerStatus = Require<TextBlock>(window, "ExtensionServerStatusText");
+            var extensionInstallStatus = Require<TextBlock>(window, "ExtensionInstallStatusText");
             _ = Require<ProgressBar>(window, "ExtensionInstallProgressBar");
             _ = Require<Button>(window, "CheckDirectButton");
             _ = Require<Button>(window, "StartTunnelButton");
@@ -553,9 +554,40 @@ internal static class Program
                 }
                 closeOverlay.Invoke(window, null);
             }
+
+            var applyExtensionStatus = typeof(MainWindow).GetMethod(
+                "ApplyExtensionServerStatusLine", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Extension server state is not available.");
+            var refreshExtensionDisplay = typeof(MainWindow).GetMethod(
+                "DisplayExtensionInstallState", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Extension state display was not found.");
+            var activeFixture = new ConnectionProfile { Name = "ready fixture", Status = ProfileStatus.Ready };
+            selectedProfile.SetValue(window, Activator.CreateInstance(selectedProfile.FieldType,
+                activeFixture, false, @"C:\fixture\runtime.json"));
+            applyExtensionStatus.Invoke(window, [activeFixture.Id, "CODEX_EXTENSION_STATUS:installed:sign-in-required\r"]);
+            applyExtensionStatus.Invoke(window, [Guid.NewGuid(), "CODEX_EXTENSION_STATUS:not-installed:signed-in"]);
+            if (extensionServerStatus.Text != "服务器已安装 · 未登录"
+                || extensionInstallStatus.Visibility != Visibility.Collapsed)
+            {
+                throw new InvalidOperationException("An installed server's sign-in state was lost or overwritten by a different server.");
+            }
+            applyExtensionStatus.Invoke(window, [activeFixture.Id, "CODEX_EXTENSION_STATUS:installed:signed-in"]);
+            if (extensionServerStatus.Text != "服务器已安装 · 已登录")
+                throw new InvalidOperationException("The installed extension's sign-in status did not update.");
+            applyExtensionStatus.Invoke(window, [activeFixture.Id, "CODEX_EXTENSION_STATUS:unknown:unknown"]);
+            if (extensionServerStatus.Text != "无法确认服务器安装和登录状态"
+                || MainWindow.GetExtensionServerStatusText("prefix CODEX_EXTENSION_STATUS:installed:sign-in-required") is not null
+                || MainWindow.GetExtensionServerStatusText("CODEX_EXTENSION_STATUS:installed:other") is not null)
+            {
+                throw new InvalidOperationException("Unknown or malformed extension status was treated as a verified state.");
+            }
             selectedProfile.SetValue(window, null);
+            refreshExtensionDisplay.Invoke(window, null);
+            if (extensionServerStatus.Text != "选择服务器后检测安装和登录状态")
+                throw new InvalidOperationException("Server selection retained extension status after being cleared.");
             setButtonsEnabled.Invoke(window, [true]);
             Console.WriteLine("PASS  Legacy and draft servers can be edited and removed at minimum window size.");
+            Console.WriteLine("PASS  The installer card shows verified installation and login state independently for each server.");
 
             addServerButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             if (overlay.Visibility != Visibility.Visible
